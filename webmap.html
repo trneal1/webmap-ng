@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<title>NWS Dashboard</title>
+
+<link rel="stylesheet" href="styles.css"/>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+</head>
+<body tabindex="0">
+
+<div id="map">
+  <div id="startupStatus" role="status" aria-live="polite">
+    <div id="startupStatusTitle">Starting dashboard...</div>
+    <div id="startupProgress" aria-hidden="true">
+      <div id="startupProgressBar"></div>
+    </div>
+    <div id="startupProgressText">0% complete</div>
+    <div id="startupStatusList">
+      <div id="startupStatusSetup" class="startup-status-item">Setup: loading</div>
+      <div id="startupStatusHistory" class="startup-status-item">
+        <span class="startup-status-label">History: waiting</span>
+        <div class="startup-task-progress" aria-hidden="true"><div id="startupProgressHistory" class="startup-task-progress-bar"></div></div>
+      </div>
+      <div id="startupStatusAlertRefs" class="startup-status-item">Alert refs: waiting</div>
+      <div id="startupStatusPlot" class="startup-status-item">
+        <span class="startup-status-label">Plot cache: waiting</span>
+        <div class="startup-task-progress" aria-hidden="true"><div id="startupProgressPlot" class="startup-task-progress-bar"></div></div>
+      </div>
+      <div id="startupStatusHistoryMap" class="startup-status-item">
+        <span class="startup-status-label">History map: waiting</span>
+        <div class="startup-task-progress" aria-hidden="true"><div id="startupProgressHistoryMap" class="startup-task-progress-bar"></div></div>
+      </div>
+      <div id="startupStatusCounties" class="startup-status-item">Counties: waiting</div>
+      <div id="startupStatusStates" class="startup-status-item">States: waiting</div>
+    </div>
+  </div>
+  <div id="tornadoWarningBanner" role="status" aria-live="polite">tornado warnings</div>
+  <div id="historyMapBadges" aria-live="polite">
+    <div id="historyModeBadge" class="history-map-badge">History</div>
+    <div id="historyTimeBadge" class="history-map-badge">No history loaded</div>
+  </div>
+</div>
+<div id="updateTimer">
+  <div class="weather-update">Weather: <span id="weatherCountdown">1:00</span></div>
+  <div class="radar-update">Radar: <span id="radarCountdown">5:00</span></div>
+</div>
+
+<div id="eventFilterOverlay" role="dialog" aria-modal="true" aria-labelledby="eventFilterTitle">
+  <div id="eventFilterDialog">
+    <div id="eventFilterHeader">
+      <h3 id="eventFilterTitle">Event Titles</h3>
+      <span class="panel-header-buttons">
+        <button id="minimizeEventFilter" type="button" data-click="minimizeEventFilterPopup" aria-label="Minimize event title filter" title="Minimize">&minus;</button>
+        <button id="closeEventFilter" type="button" data-click="closeEventFilterPopup" aria-label="Close event title filter" title="Close">&times;</button>
+      </span>
+    </div>
+    <div id="eventFilterActions">
+      <button type="button" data-click="selectAllEventTitles">All</button>
+      <button type="button" data-click="selectNoEventTitles">None</button>
+      <button type="button" data-click="clearEventTitles">Reset</button>
+      <button type="button" data-click="closeEventFilterPopup">Close</button>
+    </div>
+    <div id="eventFilterList"></div>
+  </div>
+</div>
+
+<div id="eventDetailPanels"></div>
+
+<div id="setupPanel" role="dialog" aria-modal="false" aria-labelledby="setupTitle">
+  <div id="setupHeader">
+    <h3 id="setupTitle">Setup</h3>
+    <button id="closeSetup" type="button" data-click="closeSetupPanel" aria-label="Close setup" title="Close">&times;</button>
+  </div>
+  <div id="setupBody">
+    <div class="setupSection">
+      <h4>Updates</h4>
+      <label>Weather updates (min) <input id="weatherUpdateMinutes" type="number" min="0.1" step="0.1" value="1" data-change="applySetupSettings"></label>
+      <label>Radar updates (min) <input id="radarUpdateMinutes" type="number" min="0.1" step="0.1" value="5" data-change="applySetupSettings"></label>
+      <label>Record history <input id="historyRecordingToggle" type="checkbox" checked data-change="applySetupSettings"></label>
+      <label>Weather updates per history frame <input id="historyFrameWeatherUpdates" type="number" min="1" max="1440" step="1" value="1" data-change="applySetupSettings"></label>
+      <label>Days of history <input id="historyRetentionDays" type="number" min="1" max="365" step="1" value="7" data-change="applySetupSettings"></label>
+      <label>Label location
+        <span class="coordinate-fields">
+          <input id="labelLocationLat" type="number" min="-90" max="90" step="0.000001" placeholder="Lat" data-change="applySetupSettings">
+          <input id="labelLocationLon" type="number" min="-180" max="180" step="0.000001" placeholder="Lon" data-change="applySetupSettings">
+        </span>
+      </label>
+    </div>
+
+    <div class="setupSection">
+      <h4>Filters</h4>
+      <div class="setupInlineControls">
+        <label>Severity
+          <select id="severityFilter" data-change="applyFilters">
+            <option value="">All</option>
+            <option>Extreme</option>
+            <option>Severe</option>
+            <option>Moderate</option>
+            <option>Minor</option>
+          </select>
+        </label>
+        <label><input type="checkbox" id="expiredOnlyToggle" data-change="applyFilters"> Expired only</label>
+      </div>
+      <div class="setupFieldChoices" aria-label="Search fields">
+        <b>Search Fields</b>
+        <label><input type="checkbox" id="field_event" checked> Event</label>
+        <label><input type="checkbox" id="field_headline" checked> Headline</label>
+        <label><input type="checkbox" id="field_description" checked> Description</label>
+        <label><input type="checkbox" id="field_area" checked> Area</label>
+        <label><input type="checkbox" id="field_id"> Alert ID</label>
+      </div>
+      <div class="setupInlineControls">
+        <label>Search <input id="searchFilter" type="search" placeholder="Use & | ! ( )"></label>
+        <button type="button" data-click="applyFilters">Apply</button>
+        <button type="button" data-click="clearSearch">Clear</button>
+      </div>
+    </div>
+
+    <div class="setupSection">
+      <h4>Display</h4>
+      <label><input type="checkbox" id="blinkToggle" checked data-change="redrawMap"> Blink recent alerts</label>
+      <label><input type="checkbox" id="showEventsToggle" data-change="redrawMap"> Show Event Names</label>
+      <label>Map Opacity <input type="range" id="mapOpacity" min="0" max="100" value="100" data-input="updateMapOpacity"></label>
+      <label>County Opacity <input type="range" id="countyOpacity" min="0" max="100" value="70" data-input="updateCountyOpacity"></label>
+      <label><input type="checkbox" id="radarToggle" data-change="toggleRadar"> Radar</label>
+      <label>Radar Opacity <input type="range" id="radarOpacity" min="0" max="100" value="60" data-input="updateRadarOpacity"></label>
+      <label>Map Type
+        <select id="mapTypeSelector" data-change="switchMapType">
+          <option value="Street" selected>Street</option>
+          <option value="Topological">Topological</option>
+        </select>
+      </label>
+    </div>
+
+    <div id="setupActions">
+      <button type="button" data-click="resetSetupSettings">Defaults</button>
+      <button id="shortcutHelpButton" type="button" data-click="toggleShortcutHelpPanel" title="Keyboard shortcuts">Help</button>
+      <button type="button" data-click="closeSetupPanel">Close</button>
+    </div>
+</div>
+</div>
+
+<div id="priorityPanel" role="dialog" aria-modal="false" aria-labelledby="priorityTitle">
+  <div id="priorityHeader">
+    <h3 id="priorityTitle">Weather Priority</h3>
+    <span class="panel-header-buttons">
+      <button id="minimizePriority" type="button" data-click="minimizePriorityPanel" aria-label="Minimize weather priority" title="Minimize">&minus;</button>
+      <button id="closePriority" type="button" data-click="closePriorityPanel" aria-label="Close weather priority" title="Close">&times;</button>
+    </span>
+  </div>
+  <div id="priorityBody">
+    <div id="priorityList"></div>
+    <div id="priorityActions">
+      <button type="button" data-click="resetPrioritySettings">Defaults</button>
+      <button type="button" data-click="closePriorityPanel">Close</button>
+    </div>
+  </div>
+</div>
+
+<div id="shortcutHelpPanel" role="dialog" aria-modal="false" aria-labelledby="shortcutHelpTitle">
+  <div id="shortcutHelpHeader">
+    <h3 id="shortcutHelpTitle">Keyboard Shortcuts</h3>
+    <button id="closeShortcutHelp" type="button" data-click="closeShortcutHelpPanel" aria-label="Close keyboard shortcuts" title="Close">&times;</button>
+  </div>
+  <div id="shortcutHelpBody">
+    <div class="shortcut-section">
+      <h4>Panels</h4>
+      <div class="shortcut-grid">
+        <kbd>?</kbd><span>Keyboard shortcuts</span>
+        <kbd>S</kbd><span>Setup</span>
+        <kbd>U</kbd><span>Weather priority/colors</span>
+        <kbd>H</kbd><span>History playback</span>
+        <kbd>A</kbd><span>History alert-count map</span>
+        <kbd>G</kbd><span>Event plot</span>
+        <kbd>T</kbd><span>Event title filter</span>
+        <kbd>Q</kbd><span>Precipitation controls</span>
+        <kbd>Y</kbd><span>Lightning controls</span>
+        <kbd>K</kbd><span>Cloud layer on/off</span>
+        <kbd>W</kbd><span>Show/hide all popup windows</span>
+        <kbd>Esc</kbd><span>Close the active floating panel</span>
+      </div>
+    </div>
+    <div class="shortcut-section">
+      <h4>Map</h4>
+      <div class="shortcut-grid">
+        <kbd>I</kbd><span>Zoom in while held</span>
+        <kbd>O</kbd><span>Zoom out while held</span>
+        <kbd>R</kbd><span>Radar on/off</span>
+        <kbd>V</kbd><span>NWS alert polygons on/off</span>
+        <kbd>M</kbd><span>Switch map type</span>
+        <kbd>C</kbd><span>Cycle county colorization</span>
+        <kbd>Space</kbd><span>Sample precipitation or point altitude at cursor</span>
+        <kbd>L</kbd><span>State labels/location marker on/off</span>
+        <kbd>Right click</kbd><span>Pan map to clicked point</span>
+      </div>
+    </div>
+    <div class="shortcut-section">
+      <h4>Saved Views</h4>
+      <div class="shortcut-grid">
+        <kbd>1-9</kbd><span>Restore saved map view</span>
+        <kbd>Shift + 1-9</kbd><span>Save current map view</span>
+      </div>
+    </div>
+    <div class="shortcut-section">
+      <h4>History</h4>
+      <div class="shortcut-grid">
+        <kbd>N</kbd><span>Next single frame</span>
+        <kbd>n</kbd><span>Next frame step</span>
+        <kbd>P</kbd><span>Previous single frame</span>
+        <kbd>p</kbd><span>Previous frame step</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="plotPanel" role="dialog" aria-modal="false" aria-labelledby="plotTitle">
+  <div id="plotHeader">
+    <h3 id="plotTitle">Event Plot</h3>
+    <span id="plotStatus">No data</span>
+    <span class="panel-header-buttons">
+      <button id="minimizePlot" type="button" data-click="minimizePlotPanel" aria-label="Minimize event plot" title="Minimize">&minus;</button>
+      <button id="closePlot" type="button" data-click="closePlotPanel" aria-label="Close event plot" title="Close">&times;</button>
+    </span>
+  </div>
+  <div id="plotBody">
+    <div id="plotControls">
+      <label>Start <input id="plotStart" type="datetime-local" data-change="refreshEventPlot"></label>
+      <label>Stop <input id="plotStop" type="datetime-local" data-change="handlePlotStopChange"></label>
+      <label>Count <select id="plotCountMode" data-change="changePlotCountMode"><option value="alerts">Active alerts</option><option value="counties">Impacted counties</option></select></label>
+      <label>Event titles <select id="plotEventTitles" multiple data-change="refreshEventPlot"></select></label>
+      <button type="button" data-click="selectAllPlotEventTitles">All</button>
+      <button type="button" data-click="selectNoPlotEventTitles">None</button>
+      <button type="button" data-click="reloadPlotHistory">Update</button>
+      <button type="button" data-click="refreshEventPlot">Plot</button>
+      <button type="button" data-click="gotoPlotCursorHistoryFrame">Goto</button>
+      <button type="button" data-click="closePlotPanel">Close</button>
+    </div>
+    <div id="plotCanvasWrap">
+      <canvas id="eventPlotCanvas" width="1200" height="460"></canvas>
+      <div id="plotCursorTooltip" aria-live="polite"></div>
+    </div>
+    <div id="plotHint"></div>
+  </div>
+</div>
+
+<div id="historyPanel" role="dialog" aria-modal="false" aria-labelledby="historyTitle">
+  <div id="historyHeader">
+    <h3 id="historyTitle">History Playback</h3>
+    <span id="historyStatus">0 frames</span>
+    <span class="panel-header-buttons">
+      <button id="minimizeHistory" type="button" data-click="minimizeHistoryPanel" aria-label="Minimize history playback" title="Minimize">&minus;</button>
+      <button id="closeHistory" type="button" data-click="closeHistoryPanel" aria-label="Close history playback" title="Close">&times;</button>
+    </span>
+  </div>
+  <div id="historyBody">
+    <input id="historySlider" type="range" min="0" max="0" value="0" data-input="showHistoryFrameFromValue">
+    <div id="historyTime">No history loaded</div>
+    <div id="historyClearProgress" role="status" aria-live="polite">
+      <div id="historyClearProgressTrack" aria-hidden="true">
+        <div id="historyClearProgressBar"></div>
+      </div>
+      <div id="historyClearProgressText">Ready</div>
+    </div>
+    <div id="historyControls">
+      <label>Start <input id="historyStart" type="datetime-local" data-change="syncHistoryRangeInputs"></label>
+      <label>Stop <input id="historyStop" type="datetime-local" data-change="syncHistoryRangeInputs"></label>
+      <label>Frames/step <input id="historyFramesPerStep" type="number" min="1" max="1440" value="1"></label>
+      <label>Steps/min <input id="historyStepsPerMinute" type="number" min="1" max="600" value="60"></label>
+      <button type="button" data-click="rewindHistory" title="Rewind">|&lt;</button>
+      <button type="button" data-click="playHistoryReverse" title="Reverse">&lt;</button>
+      <button type="button" data-click="playHistoryForward" title="Play">&gt;</button>
+      <button type="button" data-click="stopHistoryPlayback" title="Stop">Stop</button>
+      <button type="button" data-click="fastForwardHistory" title="Fast forward">&gt;|</button>
+      <button type="button" data-click="reloadHistoryPanel" title="Load newer history frames">Update</button>
+      <button type="button" data-click="searchNextTornadoWarningFrame" title="Find next tornado warning">Tornado Search</button>
+      <button id="clearHistoryButton" type="button" data-click="clearHistorySnapshots" title="Clear saved history">Clear History</button>
+      <button type="button" data-click="closeHistoryPanel" title="Return to live">Live</button>
+    </div>
+  </div>
+</div>
+
+<div id="historyMapPanel" role="dialog" aria-modal="false" aria-labelledby="historyMapTitle">
+  <div id="historyMapHeader">
+    <h3 id="historyMapTitle">History Alert Map</h3>
+    <span id="historyMapPanelStatus">No data</span>
+    <span class="panel-header-buttons">
+      <button id="minimizeHistoryMap" type="button" data-click="minimizeHistoryMapPanel" aria-label="Minimize history alert map" title="Minimize">&minus;</button>
+      <button id="closeHistoryMap" type="button" data-click="closeHistoryMapPanel" aria-label="Close history alert map" title="Close">&times;</button>
+    </span>
+  </div>
+  <div id="historyMapBody">
+    <div id="historyMapControls">
+      <label>Quick time
+        <select id="historyMapQuickRange" data-change="setHistoryMapQuickRangeFromValue">
+          <option value="">Custom</option>
+          <option value="1">Last 1 hr</option>
+          <option value="2">Last 2 hr</option>
+          <option value="6">Last 6 hr</option>
+          <option value="12">Last 12 hr</option>
+          <option value="24">Last 24 hr</option>
+          <option value="48">Last 48 hr</option>
+          <option value="96">Last 96 hr</option>
+        </select>
+      </label>
+      <label>Start <input id="historyMapStart" type="datetime-local" data-change="applyCustomHistoryMapRange"></label>
+      <label>Stop <input id="historyMapStop" type="datetime-local" data-change="applyCustomHistoryMapRange"></label>
+      <label>Event titles
+        <select id="historyMapEventTypes" multiple data-change="applyHistoryMapFromControls"></select>
+      </label>
+      <div id="historyMapActions">
+        <button type="button" data-click="selectAllHistoryMapEventTypes" title="Select all alert types">All</button>
+        <button type="button" data-click="clearHistoryMapEventTypes" title="Clear alert type selection">None</button>
+        <button type="button" data-click="applyHistoryMapFromControls" title="Colorize counties by alert counts">Map Counts</button>
+        <button type="button" data-click="closeHistoryMapPanel" title="Return to live alert coloring">Close</button>
+      </div>
+      <div id="historyMapStatus">Press A to map alert counts for the selected period.</div>
+    </div>
+  </div>
+</div>
+
+<button id="precipButton" type="button" data-click="togglePrecipPanel" title="Precipitation">Precip</button>
+
+<div id="precipPanel" role="dialog" aria-modal="false" aria-labelledby="precipTitle">
+  <div id="precipHeader">
+    <h3 id="precipTitle">Precipitation</h3>
+    <button id="closePrecip" type="button" data-click="closePrecipPanel" aria-label="Close precipitation controls" title="Close">&times;</button>
+  </div>
+  <div id="precipBody">
+    <label>Overlay <input type="checkbox" id="precipToggle" data-change="togglePrecipLayer"></label>
+    <label>Range
+      <select id="precipRangeSelector" data-change="changePrecipRange">
+        <option value="1h" selected>Last 1h</option>
+        <option value="3h">Last 3h</option>
+        <option value="6h">Last 6h</option>
+        <option value="12h">Last 12h</option>
+        <option value="24h">Last 24h</option>
+        <option value="48h">Last 48h</option>
+        <option value="72h">Last 72h</option>
+      </select>
+    </label>
+    <label>Opacity <input type="range" id="precipOpacity" min="0" max="100" value="80" data-input="updatePrecipOpacity"></label>
+    <div id="precipStatus">Off</div>
+  </div>
+</div>
+
+<button id="lightningButton" type="button" data-click="toggleLightningPanel" title="Lightning">Lightning</button>
+
+<button id="cloudButton" type="button" data-click="toggleCloudLayer" title="Cloud layer (K)">Clouds</button>
+
+<div id="lightningPanel" role="dialog" aria-modal="false" aria-labelledby="lightningTitle">
+  <div id="lightningHeader">
+    <h3 id="lightningTitle">Lightning</h3>
+    <button id="closeLightning" type="button" data-click="closeLightningPanel" aria-label="Close lightning controls" title="Close">&times;</button>
+  </div>
+  <div id="lightningBody">
+    <label>Overlay <input type="checkbox" id="lightningToggle" data-change="toggleLightningLayer"></label>
+    <label>Opacity <input type="range" id="lightningOpacity" min="0" max="100" value="80" data-input="updateLightningOpacity"></label>
+    <div id="lightningStatus">Off</div>
+  </div>
+</div>
+
+<div id="lightningScalePanel" class="mapScalePanel" aria-label="Lightning density color scale">
+  <div id="lightningScaleHeader" class="mapScaleHeader">Lightning Scale</div>
+  <div class="mapScaleBody">
+    <div class="scaleLegendImageWrap">
+      <img id="lightningLegendImage" alt="NOAA lightning density color scale">
+    </div>
+  </div>
+</div>
+
+<div id="precipScalePanel" class="mapScalePanel" aria-label="Precipitation color scale">
+  <div id="precipScaleHeader" class="mapScaleHeader">Precipitation Scale</div>
+  <div class="mapScaleBody">
+    <div class="scaleLegendImageWrap">
+      <img id="precipLegendImage" alt="NOAA precipitation color scale">
+      <div id="precipLegendFallback" class="precipLegendFallback" hidden>
+        <div class="precipLegendGradient"></div>
+        <div class="precipLegendTicks">
+          <span>0</span><span>0.1</span><span>0.5</span><span>1</span><span>2</span><span>4+</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="resizer"></div>
+
+<div id="panelRestoreDock" aria-label="Minimized panels">
+  <button id="restoreEventFilterButton" type="button" data-click="restoreEventFilterPopup">Event Titles</button>
+  <button id="restorePriorityButton" type="button" data-click="restorePriorityPanel">Weather Priority</button>
+  <button id="restorePlotButton" type="button" data-click="restorePlotPanel">Event Plot</button>
+  <button id="restoreHistoryMapButton" type="button" data-click="restoreHistoryMapPanel">History Alert Map</button>
+  <button id="restoreHistoryButton" type="button" data-click="restoreHistoryPanel">History Playback</button>
+</div>
+
+<button id="openSidebar" type="button" data-click="openSidebar" title="Open details">Details</button>
+
+<div id="sidebar">
+
+<div id="sidebarHeader">
+<h3>Details</h3>
+<span>
+<button id="closeSidebar" type="button" data-click="closeSidebar" aria-label="Close sidebar" title="Close sidebar">&times;</button>
+</span>
+</div>
+
+<div id="content">Click a county</div>
+
+</div>
+
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+
+<script type="module" src="src/main.js"></script>
+
+</body>
+</html>

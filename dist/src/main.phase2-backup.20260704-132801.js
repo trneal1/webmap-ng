@@ -1,0 +1,6755 @@
+const ALERTS_URL = "https://api.weather.gov/alerts/active";
+
+const map = L.map('map', {
+    wheelPxPerZoomLevel: 150,
+    keyboard: false
+}).setView([37.8,-96],4);
+
+const baseLayers = {
+    'Street': L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap contributors'
+    }),
+    'Topological': L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap contributors &copy; OpenTopoMap (CC-BY-SA)',
+        subdomains: 'abc',
+        maxZoom: 17
+    })
+};
+
+let currentBaseLayer = baseLayers['Street'].addTo(map);
+
+// Explicitly disable keyboard handling
+if (map.keyboard) {
+    map.keyboard.disable();
+}
+
+map.createPane('precipPane');
+map.getPane('precipPane').style.zIndex = 450;
+map.getPane('precipPane').style.pointerEvents = 'none';
+map.createPane('cloudPane');
+map.getPane('cloudPane').style.zIndex = 350;
+map.getPane('cloudPane').style.pointerEvents = 'none';
+map.createPane('lightningPane');
+map.getPane('lightningPane').style.zIndex = 460;
+map.getPane('lightningPane').style.pointerEvents = 'none';
+map.createPane('alertPolygonPane');
+map.getPane('alertPolygonPane').style.zIndex = 425;
+
+let geoLayer, geojsonData, rawData = {}, blinkIntervals = {};
+let liveAlertFeatures = [];
+let alertPolygonLayer = null;
+let alertPolygonsVisible = false;
+let selectedAlertPolygonIds = new Set();
+let countyFeatureByFips = {};
+let radarLayer = null;
+let precipLayer = null;
+let precipRefreshToken = 0;
+let activePrecipTooltipTarget = null;
+let activeCountyCursorTarget = null;
+let lightningLayer = null;
+let lightningRefreshToken = 0;
+let cloudLayer = null;
+let cloudRefreshToken = 0;
+let cloudRefreshTimer = null;
+let currentRadarTimestamp = Date.now();
+let countyOpacityValue = 0.7;
+let countyColorizationMode = 1;
+let stateLayer;
+let stateLabelLayer = null;
+let stateLabelsVisible = false;
+let stateLabelMarkers = [];
+let currentLocationCrosshair = null;
+let labelLocationLatLng = null;
+let eventFocusLayer = null;
+let liveRawData = {};
+let historyFrames = [];
+let historyModeActive = false;
+let historyPlaybackTimer = null;
+let historyPlaybackDirection = 1;
+let historyPlaybackToken = 0;
+let historyPlaybackActive = false;
+let historyFrameTimestamp = null;
+let historyPanelLoading = false;
+let historyLoadToken = 0;
+let historyFrameLoadToken = 0;
+let historyFrameCache = new Map();
+let historyAlertHashIndex = null;
+let historyAlertHashIndexLoadPromise = null;
+let historyIndexCache = [];
+let historyIndexReady = false;
+let historyIndexLoading = false;
+let historyIndexLoadPromise = null;
+let historyClearGeneration = 0;
+let historyMapActive = false;
+let historyMapLoading = false;
+let historyMapLoadToken = 0;
+let historyMapCountyCounts = {};
+let historyMapCountyEvents = {};
+let historyMapCountyAlerts = {};
+let historyMapMaxCount = 0;
+let historyMapFrameCount = 0;
+let historyMapRangeLabel = "";
+let historyMapCache = {
+    frames:[],
+    titleCounts:new Map()
+};
+let historyMapReady = false;
+let historyMapCacheLoading = false;
+let historyMapCacheLoadPromise = null;
+let historyMapSidebarLoadToken = 0;
+let historyMapSidebarCache = new Map();
+let historyMapSuppressedLiveState = null;
+const HISTORY_MAP_SIDEBAR_CACHE_LIMIT = 8;
+let plotHistoryCache = {
+    frames:[],
+    titleCounts:new Map()
+};
+let plotHistoryReady = false;
+let plotHistoryLoading = false;
+let plotHistoryLoadPromise = null;
+let plotStopAutoFollowLatest = true;
+let startupBackgroundCachesStarted = false;
+let currentSidebarSelection = null;
+
+// Timer tracking
+let nextWeatherUpdate = Date.now();
+let nextRadarUpdate = Date.now();
+let weatherUpdateInterval = 60000; // 60 seconds
+let radarUpdateInterval = 300000; // 300 seconds
+let weatherRefreshTimer = null;
+let radarRefreshTimer = null;
+let lightningRefreshTimer = null;
+let historyRecordingEnabled = true;
+let historyFrameWeatherUpdates = 1;
+let historyRetentionDays = 7;
+let weatherUpdatesSinceHistoryFrame = 0;
+const SETUP_SETTINGS_KEY = "nwsDashboardSetupSettings";
+const PRIORITY_SETTINGS_KEY = "nwsDashboardPrioritySettings";
+const DEFAULT_PRIORITY_ORDER = ["tornado-warning", "warning", "statement", "watch", "advisory", "other"];
+const DEFAULT_PRIORITY_COLORS = {
+    "tornado-warning":"#ff8c00",
+    warning:"#ff0000",
+    watch:"#ffff00",
+    advisory:"#00aa00",
+    statement:"#0000ff",
+    other:"#800080"
+};
+const HISTORY_DB_NAME = "nwsDashboardHistory";
+const HISTORY_DB_VERSION = 5;
+const HISTORY_STORE_NAME = "snapshots";
+const RADAR_TILE_STORE_NAME = "radarTiles";
+const HISTORY_ALERT_HASH_STORE_NAME = "alertHashIndex";
+const HISTORY_FRAME_DEDUP_MS = 60000;
+const RADAR_TILE_URL = "https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q/{z}/{x}/{y}.png";
+const HISTORY_RADAR_WMS_URL = "https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0r-t.cgi";
+const HISTORY_RADAR_WMS_LAYER = "nexrad-n0r-wmst";
+const HISTORY_FRAME_CACHE_LIMIT = 30;
+const PRECIP_WMS_URL = "https://mapservices.weather.noaa.gov/raster/services/obs/mrms_qpe/ImageServer/WMSServer";
+const PRECIP_WMS_LAYERS = {
+    "1h": "mrms_qpe:rft_1hr:unknown@gpml",
+    "3h": "mrms_qpe:rft_3hr:unknown@gpml",
+    "6h": "mrms_qpe:rft_6hr:unknown@gpml",
+    "12h": "mrms_qpe:rft_12hr:unknown@gpml",
+    "24h": "mrms_qpe:rft_24hr:unknown@gpml",
+    "48h": "mrms_qpe:rft_48hr:unknown@gpml",
+    "72h": "mrms_qpe:rft_72hr:unknown@gpml"
+};
+const PRECIP_TILE_RETRY_LIMIT = 2;
+const PRECIP_REST_URL = "https://mapservices.weather.noaa.gov/raster/rest/services/obs/mrms_qpe/ImageServer";
+const PRECIP_MM_PER_INCH = 25.4;
+const LIGHTNING_WMS_URL = "https://nowcoast.noaa.gov/geoserver/ows";
+const LIGHTNING_WMS_LAYER = "lightning_detection:ldn_lightning_strike_density";
+const LIGHTNING_WMS_STYLE = "lightning_density";
+const LIGHTNING_REFRESH_INTERVAL = 15 * 60 * 1000;
+const LIGHTNING_TILE_RETRY_LIMIT = 2;
+const CLOUD_WMS_URL = "https://nowcoast.noaa.gov/geoserver/ows";
+const CLOUD_WMS_LAYER = "satellite:global_visible_imagery_mosaic";
+const CLOUD_REFRESH_INTERVAL = 15 * 60 * 1000;
+const CLOUD_TILE_RETRY_LIMIT = 2;
+const CLOUD_LAYER_OPACITY = 0.55;
+const startupStatusState = {
+    setup:false,
+    history:false,
+    alertRefs:false,
+    plot:false,
+    historyMap:false,
+    counties:false,
+    states:false
+};
+
+const stateAbbreviations = {
+    "01":"AL","02":"AK","04":"AZ","05":"AR","06":"CA","08":"CO","09":"CT","10":"DE",
+    "11":"DC","12":"FL","13":"GA","15":"HI","16":"ID","17":"IL","18":"IN","19":"IA",
+    "20":"KS","21":"KY","22":"LA","23":"ME","24":"MD","25":"MA","26":"MI","27":"MN",
+    "28":"MS","29":"MO","30":"MT","31":"NE","32":"NV","33":"NH","34":"NJ","35":"NM",
+    "36":"NY","37":"NC","38":"ND","39":"OH","40":"OK","41":"OR","42":"PA","44":"RI",
+    "45":"SC","46":"SD","47":"TN","48":"TX","49":"UT","50":"VT","51":"VA","53":"WA",
+    "54":"WV","55":"WI","56":"WY"
+};
+
+const stateNameToAbbreviation = {
+    "Alabama":"AL","Alaska":"AK","Arizona":"AZ","Arkansas":"AR","California":"CA","Colorado":"CO",
+    "Connecticut":"CT","Delaware":"DE","District of Columbia":"DC","Florida":"FL","Georgia":"GA",
+    "Hawaii":"HI","Idaho":"ID","Illinois":"IL","Indiana":"IN","Iowa":"IA","Kansas":"KS",
+    "Kentucky":"KY","Louisiana":"LA","Maine":"ME","Maryland":"MD","Massachusetts":"MA",
+    "Michigan":"MI","Minnesota":"MN","Mississippi":"MS","Missouri":"MO","Montana":"MT",
+    "Nebraska":"NE","Nevada":"NV","New Hampshire":"NH","New Jersey":"NJ","New Mexico":"NM",
+    "New York":"NY","North Carolina":"NC","North Dakota":"ND","Ohio":"OH","Oklahoma":"OK",
+    "Oregon":"OR","Pennsylvania":"PA","Rhode Island":"RI","South Carolina":"SC",
+    "South Dakota":"SD","Tennessee":"TN","Texas":"TX","Utah":"UT","Vermont":"VT",
+    "Virginia":"VA","Washington":"WA","West Virginia":"WV","Wisconsin":"WI","Wyoming":"WY"
+};
+
+let filters = {
+    severity:"",
+    search:"",
+    fields:["event","headline","description","areaDesc"],
+    expiredOnly:false,
+    eventTitleMode:"all",
+    eventTitles:[]
+};
+
+let eventTitleFilterSnapshot={ mode:"all", titles:[] };
+let eventTitleCyclePositions={};
+let focusedEventTitle="";
+let focusedEventCountyFips="";
+const eventCountyPanels=new Map();
+const eventAlertPanels=new Map();
+const eventAlertPanelSelectedIds=new Map();
+let eventDetailPanelZIndex=2500;
+let isDraggingEventFilter=false;
+let eventFilterDragOffset={ x:0, y:0 };
+let draggedEventDetailPanel=null;
+let eventDetailPanelDragOffset={ x:0, y:0 };
+let isDraggingHistoryPanel=false;
+let historyPanelDragOffset={ x:0, y:0 };
+let isDraggingSetupPanel=false;
+let setupPanelDragOffset={ x:0, y:0 };
+let isDraggingPriorityPanel=false;
+let priorityPanelDragOffset={ x:0, y:0 };
+let isDraggingPrecipPanel=false;
+let precipPanelDragOffset={ x:0, y:0 };
+let isDraggingLightningPanel=false;
+let lightningPanelDragOffset={ x:0, y:0 };
+let isDraggingScalePanel=false;
+let scalePanelDragTarget=null;
+let scalePanelDragOffset={ x:0, y:0 };
+let isDraggingShortcutHelpPanel=false;
+let shortcutHelpPanelDragOffset={ x:0, y:0 };
+let isDraggingPlotPanel=false;
+let plotPanelDragOffset={ x:0, y:0 };
+let isDraggingHistoryMapPanel=false;
+let historyMapPanelDragOffset={ x:0, y:0 };
+let plotFrames=[];
+let plotTitleCounts=new Map();
+let plotPanelLoading=false;
+let plotLoadToken=0;
+let plotCursorTimestamp=null;
+let isDraggingPlotCursor=false;
+let plotLastGeometry=null;
+let minimizedPanels={
+    eventFilter:false,
+    priority:false,
+    plot:false,
+    historyMap:false,
+    history:false
+};
+let prioritySettings={
+    order:[...DEFAULT_PRIORITY_ORDER],
+    colors:{...DEFAULT_PRIORITY_COLORS}
+};
+
+// ===== DRAG RESIZE =====
+const resizer = document.getElementById('resizer');
+let isResizing = false;
+
+resizer.addEventListener('mousedown', () => { isResizing = true; });
+
+document.addEventListener('mousemove', (e) => {
+    if (!isResizing) return;
+
+    const totalWidth = window.innerWidth;
+    const sidebarWidth = totalWidth - e.clientX;
+
+    const min = 200;
+    const max = totalWidth * 0.6;
+
+    if (sidebarWidth < min || sidebarWidth > max) return;
+
+    document.getElementById('sidebar').style.width = sidebarWidth + 'px';
+    document.getElementById('map').style.width = (totalWidth - sidebarWidth - 6) + 'px';
+
+    // NEW: fix map rendering while resizing
+    map.invalidateSize();
+});
+
+document.addEventListener('mouseup', () => { isResizing = false; });
+
+// ===== EVENT FILTER DRAG =====
+const eventFilterDialog=document.getElementById('eventFilterDialog');
+const eventFilterHeader=document.getElementById('eventFilterHeader');
+const eventDetailPanels=document.getElementById('eventDetailPanels');
+
+function clampEventFilterDialog(){
+    const rect=eventFilterDialog.getBoundingClientRect();
+    const maxLeft=Math.max(0,window.innerWidth-rect.width);
+    const maxTop=Math.max(0,window.innerHeight-rect.height);
+    const left=Math.min(Math.max(rect.left,0),maxLeft);
+    const top=Math.min(Math.max(rect.top,0),maxTop);
+
+    eventFilterDialog.style.left=left+"px";
+    eventFilterDialog.style.top=top+"px";
+    eventFilterDialog.style.transform="none";
+}
+
+eventFilterHeader.addEventListener('mousedown',(e)=>{
+    if(e.button !== 0 || e.target.closest('button')) return;
+
+    const rect=eventFilterDialog.getBoundingClientRect();
+    eventFilterDialog.style.left=rect.left+"px";
+    eventFilterDialog.style.top=rect.top+"px";
+    eventFilterDialog.style.transform="none";
+
+    isDraggingEventFilter=true;
+    eventFilterDragOffset={
+        x:e.clientX-rect.left,
+        y:e.clientY-rect.top
+    };
+    e.preventDefault();
+});
+
+document.addEventListener('mousemove',(e)=>{
+    if(!isDraggingEventFilter) return;
+
+    const rect=eventFilterDialog.getBoundingClientRect();
+    const maxLeft=Math.max(0,window.innerWidth-rect.width);
+    const maxTop=Math.max(0,window.innerHeight-rect.height);
+    const left=Math.min(Math.max(e.clientX-eventFilterDragOffset.x,0),maxLeft);
+    const top=Math.min(Math.max(e.clientY-eventFilterDragOffset.y,0),maxTop);
+
+    eventFilterDialog.style.left=left+"px";
+    eventFilterDialog.style.top=top+"px";
+});
+
+document.addEventListener('mouseup',()=>{
+    isDraggingEventFilter=false;
+});
+
+function clampEventDetailPanel(panel){
+    if(!panel?.isConnected) return;
+    const rect=panel.getBoundingClientRect();
+    const maxLeft=Math.max(0,window.innerWidth-rect.width);
+    const maxTop=Math.max(0,window.innerHeight-rect.height);
+    const left=Math.min(Math.max(rect.left,0),maxLeft);
+    const top=Math.min(Math.max(rect.top,0),maxTop);
+
+    panel.style.left=left+"px";
+    panel.style.top=top+"px";
+    panel.style.transform="none";
+}
+
+eventDetailPanels.addEventListener('mousedown',(e)=>{
+    const panel=e.target.closest('.event-detail-panel');
+    if(panel) panel.style.zIndex=String(++eventDetailPanelZIndex);
+    if(e.button !== 0 || e.target.closest('button')) return;
+    if(!e.target.closest('.event-detail-header') || !panel) return;
+
+    const rect=panel.getBoundingClientRect();
+    panel.style.left=rect.left+"px";
+    panel.style.top=rect.top+"px";
+    panel.style.transform="none";
+
+    draggedEventDetailPanel=panel;
+    eventDetailPanelDragOffset={
+        x:e.clientX-rect.left,
+        y:e.clientY-rect.top
+    };
+    e.preventDefault();
+});
+
+document.addEventListener('mousemove',(e)=>{
+    if(!draggedEventDetailPanel) return;
+
+    const rect=draggedEventDetailPanel.getBoundingClientRect();
+    const maxLeft=Math.max(0,window.innerWidth-rect.width);
+    const maxTop=Math.max(0,window.innerHeight-rect.height);
+    const left=Math.min(Math.max(e.clientX-eventDetailPanelDragOffset.x,0),maxLeft);
+    const top=Math.min(Math.max(e.clientY-eventDetailPanelDragOffset.y,0),maxTop);
+
+    draggedEventDetailPanel.style.left=left+"px";
+    draggedEventDetailPanel.style.top=top+"px";
+});
+
+document.addEventListener('mouseup',()=>{
+    draggedEventDetailPanel=null;
+});
+
+document.addEventListener('click',(e)=>{
+    const button=e.target.closest('.alert-reference-link[data-alert-ref-hash]');
+    if(!button) return;
+    e.preventDefault();
+    e.stopPropagation();
+    openAlertHashPopup(button.dataset.alertRefHash);
+});
+
+document.addEventListener('click',(e)=>{
+    const button=e.target.closest('.alert-id-link[data-alert-id-hash]');
+    if(!button) return;
+    e.preventDefault();
+    e.stopPropagation();
+    openAlertReferenceTreePopup(button.dataset.alertIdHash);
+});
+
+document.addEventListener('click',(e)=>{
+    const button=e.target.closest('[data-reference-tree-action]');
+    if(!button) return;
+    const tree=button.closest('.event-detail-body')?.querySelector('.alert-reference-tree');
+    if(!tree) return;
+    e.preventDefault();
+    e.stopPropagation();
+    tree.classList.toggle('collapsed',button.dataset.referenceTreeAction === 'collapse');
+});
+
+window.addEventListener('resize',()=>{
+    if(document.getElementById('eventFilterOverlay').classList.contains('open')){
+        clampEventFilterDialog();
+    }
+    document.querySelectorAll('.event-detail-panel').forEach(clampEventDetailPanel);
+    if(document.getElementById('historyPanel').classList.contains('open')){
+        clampHistoryPanel();
+    }
+    if(document.getElementById('setupPanel').classList.contains('open')){
+        clampSetupPanel();
+    }
+    if(document.getElementById('priorityPanel').classList.contains('open')){
+        clampPriorityPanel();
+    }
+    if(document.getElementById('plotPanel').classList.contains('open')){
+        clampPlotPanel();
+        drawEventPlot();
+    }
+    if(document.getElementById('historyMapPanel').classList.contains('open')){
+        clampHistoryMapPanel();
+    }
+    clampScalePanels();
+});
+
+// ===== HISTORY PANEL DRAG =====
+const historyPanel=document.getElementById('historyPanel');
+const historyHeader=document.getElementById('historyHeader');
+
+function clampHistoryPanel(){
+    const rect=historyPanel.getBoundingClientRect();
+    const maxLeft=Math.max(0,window.innerWidth-rect.width);
+    const maxTop=Math.max(0,window.innerHeight-rect.height);
+    const left=Math.min(Math.max(rect.left,0),maxLeft);
+    const top=Math.min(Math.max(rect.top,0),maxTop);
+
+    historyPanel.style.left=left+"px";
+    historyPanel.style.top=top+"px";
+    historyPanel.style.bottom="auto";
+    historyPanel.style.transform="none";
+}
+
+historyHeader.addEventListener('mousedown',(e)=>{
+    if(e.button !== 0 || e.target.closest('button')) return;
+
+    const rect=historyPanel.getBoundingClientRect();
+    historyPanel.style.left=rect.left+"px";
+    historyPanel.style.top=rect.top+"px";
+    historyPanel.style.bottom="auto";
+    historyPanel.style.transform="none";
+
+    isDraggingHistoryPanel=true;
+    historyPanelDragOffset={
+        x:e.clientX-rect.left,
+        y:e.clientY-rect.top
+    };
+    e.preventDefault();
+});
+
+document.addEventListener('mousemove',(e)=>{
+    if(!isDraggingHistoryPanel) return;
+
+    const rect=historyPanel.getBoundingClientRect();
+    const maxLeft=Math.max(0,window.innerWidth-rect.width);
+    const maxTop=Math.max(0,window.innerHeight-rect.height);
+    const left=Math.min(Math.max(e.clientX-historyPanelDragOffset.x,0),maxLeft);
+    const top=Math.min(Math.max(e.clientY-historyPanelDragOffset.y,0),maxTop);
+
+    historyPanel.style.left=left+"px";
+    historyPanel.style.top=top+"px";
+});
+
+document.addEventListener('mouseup',()=>{
+    isDraggingHistoryPanel=false;
+});
+
+// ===== PLOT PANEL =====
+const plotPanel=document.getElementById('plotPanel');
+const plotHeader=document.getElementById('plotHeader');
+const plotStart=document.getElementById('plotStart');
+const plotStop=document.getElementById('plotStop');
+const plotCountMode=document.getElementById('plotCountMode');
+const plotEventTitles=document.getElementById('plotEventTitles');
+const eventPlotCanvas=document.getElementById('eventPlotCanvas');
+const plotCursorTooltip=document.getElementById('plotCursorTooltip');
+const plotStatus=document.getElementById('plotStatus');
+const plotHint=document.getElementById('plotHint');
+const historyMapPanel=document.getElementById('historyMapPanel');
+const historyMapHeader=document.getElementById('historyMapHeader');
+const historyMapQuickRange=document.getElementById('historyMapQuickRange');
+const historyMapStart=document.getElementById('historyMapStart');
+const historyMapStop=document.getElementById('historyMapStop');
+const historyMapPanelStatus=document.getElementById('historyMapPanelStatus');
+const restoreEventFilterButton=document.getElementById('restoreEventFilterButton');
+const restorePriorityButton=document.getElementById('restorePriorityButton');
+const restorePlotButton=document.getElementById('restorePlotButton');
+const restoreHistoryMapButton=document.getElementById('restoreHistoryMapButton');
+const restoreHistoryButton=document.getElementById('restoreHistoryButton');
+
+function updatePanelRestoreDock(){
+    restoreEventFilterButton.classList.toggle('visible',minimizedPanels.eventFilter);
+    restorePriorityButton.classList.toggle('visible',minimizedPanels.priority);
+    restorePlotButton.classList.toggle('visible',minimizedPanels.plot);
+    restoreHistoryMapButton.classList.toggle('visible',minimizedPanels.historyMap);
+    restoreHistoryButton.classList.toggle('visible',minimizedPanels.history);
+}
+
+function clampPlotPanel(){
+    const rect=plotPanel.getBoundingClientRect();
+    const maxLeft=Math.max(0,window.innerWidth-rect.width);
+    const maxTop=Math.max(0,window.innerHeight-rect.height);
+    const left=Math.min(Math.max(rect.left,0),maxLeft);
+    const top=Math.min(Math.max(rect.top,0),maxTop);
+
+    plotPanel.style.left=left+"px";
+    plotPanel.style.top=top+"px";
+    plotPanel.style.transform="none";
+}
+
+plotHeader.addEventListener('mousedown',(e)=>{
+    if(e.button !== 0 || e.target.closest('button')) return;
+
+    const rect=plotPanel.getBoundingClientRect();
+    plotPanel.style.left=rect.left+"px";
+    plotPanel.style.top=rect.top+"px";
+    plotPanel.style.transform="none";
+
+    isDraggingPlotPanel=true;
+    plotPanelDragOffset={
+        x:e.clientX-rect.left,
+        y:e.clientY-rect.top
+    };
+    e.preventDefault();
+});
+
+document.addEventListener('mousemove',(e)=>{
+    if(!isDraggingPlotPanel) return;
+
+    const rect=plotPanel.getBoundingClientRect();
+    const maxLeft=Math.max(0,window.innerWidth-rect.width);
+    const maxTop=Math.max(0,window.innerHeight-rect.height);
+    const left=Math.min(Math.max(e.clientX-plotPanelDragOffset.x,0),maxLeft);
+    const top=Math.min(Math.max(e.clientY-plotPanelDragOffset.y,0),maxTop);
+
+    plotPanel.style.left=left+"px";
+    plotPanel.style.top=top+"px";
+});
+
+document.addEventListener('mouseup',()=>{
+    isDraggingPlotPanel=false;
+});
+
+// ===== HISTORY MAP PANEL =====
+function clampHistoryMapPanel(){
+    const rect=historyMapPanel.getBoundingClientRect();
+    const maxLeft=Math.max(0,window.innerWidth-rect.width);
+    const maxTop=Math.max(0,window.innerHeight-rect.height);
+    const left=Math.min(Math.max(rect.left,0),maxLeft);
+    const top=Math.min(Math.max(rect.top,0),maxTop);
+
+    historyMapPanel.style.left=left+"px";
+    historyMapPanel.style.top=top+"px";
+    historyMapPanel.style.bottom="auto";
+    historyMapPanel.style.transform="none";
+}
+
+historyMapHeader.addEventListener('mousedown',(e)=>{
+    if(e.button !== 0 || e.target.closest('button')) return;
+
+    const rect=historyMapPanel.getBoundingClientRect();
+    historyMapPanel.style.left=rect.left+"px";
+    historyMapPanel.style.top=rect.top+"px";
+    historyMapPanel.style.bottom="auto";
+    historyMapPanel.style.transform="none";
+
+    isDraggingHistoryMapPanel=true;
+    historyMapPanelDragOffset={
+        x:e.clientX-rect.left,
+        y:e.clientY-rect.top
+    };
+    e.preventDefault();
+});
+
+document.addEventListener('mousemove',(e)=>{
+    if(!isDraggingHistoryMapPanel) return;
+
+    const rect=historyMapPanel.getBoundingClientRect();
+    const maxLeft=Math.max(0,window.innerWidth-rect.width);
+    const maxTop=Math.max(0,window.innerHeight-rect.height);
+    const left=Math.min(Math.max(e.clientX-historyMapPanelDragOffset.x,0),maxLeft);
+    const top=Math.min(Math.max(e.clientY-historyMapPanelDragOffset.y,0),maxTop);
+
+    historyMapPanel.style.left=left+"px";
+    historyMapPanel.style.top=top+"px";
+});
+
+document.addEventListener('mouseup',()=>{
+    isDraggingHistoryMapPanel=false;
+});
+
+function updatePlotCursorFromClientX(clientX){
+    if(!plotLastGeometry) return;
+
+    const rect=eventPlotCanvas.getBoundingClientRect();
+    const x=(clientX - rect.left) * plotLastGeometry.dpr;
+    const clampedX=Math.min(
+        Math.max(x,plotLastGeometry.margin.left),
+        plotLastGeometry.width - plotLastGeometry.margin.right
+    );
+    const timestamp=plotLastGeometry.timeFromX(clampedX);
+    const nearest=getNearestPlotFrameTimestamp(timestamp,plotLastGeometry.seriesByTitle);
+    if(!nearest) return;
+
+    plotCursorTimestamp=nearest;
+    drawEventPlot();
+}
+
+eventPlotCanvas.addEventListener('mousedown',(e)=>{
+    if(e.button !== 0) return;
+    isDraggingPlotCursor=true;
+    updatePlotCursorFromClientX(e.clientX);
+    e.preventDefault();
+});
+
+document.addEventListener('mousemove',(e)=>{
+    if(!isDraggingPlotCursor) return;
+    updatePlotCursorFromClientX(e.clientX);
+});
+
+document.addEventListener('mouseup',()=>{
+    isDraggingPlotCursor=false;
+});
+
+if(window.ResizeObserver){
+    const plotResizeObserver=new ResizeObserver(()=>{
+        if(plotPanel.classList.contains('open')){
+            drawEventPlot();
+        }
+    });
+    plotResizeObserver.observe(plotPanel);
+}
+
+// ===== SETUP PANEL =====
+const setupPanel=document.getElementById('setupPanel');
+const setupHeader=document.getElementById('setupHeader');
+const priorityPanel=document.getElementById('priorityPanel');
+const priorityHeader=document.getElementById('priorityHeader');
+const priorityList=document.getElementById('priorityList');
+const weatherUpdateMinutes=document.getElementById('weatherUpdateMinutes');
+const radarUpdateMinutes=document.getElementById('radarUpdateMinutes');
+const historyRecordingToggle=document.getElementById('historyRecordingToggle');
+const historyFrameWeatherUpdatesInput=document.getElementById('historyFrameWeatherUpdates');
+const historyRetentionDaysInput=document.getElementById('historyRetentionDays');
+const labelLocationLatInput=document.getElementById('labelLocationLat');
+const labelLocationLonInput=document.getElementById('labelLocationLon');
+
+function loadSetupSettings(){
+    try{
+        const settings=JSON.parse(localStorage.getItem(SETUP_SETTINGS_KEY)) || {};
+        weatherUpdateInterval=clampNumber(settings.weatherUpdateMinutes,0.1,1440,1) * 60000;
+        radarUpdateInterval=clampNumber(settings.radarUpdateMinutes,0.1,1440,5) * 60000;
+        historyRecordingEnabled=settings.historyRecordingEnabled !== false;
+        historyFrameWeatherUpdates=Math.round(clampNumber(settings.historyFrameWeatherUpdates,1,1440,1));
+        historyRetentionDays=Math.round(clampNumber(settings.historyRetentionDays,1,365,7));
+        labelLocationLatLng=getValidLatLng(settings.labelLocationLat,settings.labelLocationLon);
+    }catch(error){
+        weatherUpdateInterval=60000;
+        radarUpdateInterval=300000;
+        historyRecordingEnabled=true;
+        historyFrameWeatherUpdates=1;
+        historyRetentionDays=7;
+        labelLocationLatLng=null;
+    }
+}
+
+function saveSetupSettings(){
+    localStorage.setItem(SETUP_SETTINGS_KEY,JSON.stringify({
+        weatherUpdateMinutes:weatherUpdateInterval / 60000,
+        radarUpdateMinutes:radarUpdateInterval / 60000,
+        historyRecordingEnabled,
+        historyFrameWeatherUpdates,
+        historyRetentionDays,
+        labelLocationLat:labelLocationLatLng ? labelLocationLatLng[0] : "",
+        labelLocationLon:labelLocationLatLng ? labelLocationLatLng[1] : ""
+    }));
+}
+
+function syncSetupControls(){
+    weatherUpdateMinutes.value=String(weatherUpdateInterval / 60000);
+    radarUpdateMinutes.value=String(radarUpdateInterval / 60000);
+    historyRecordingToggle.checked=historyRecordingEnabled;
+    historyFrameWeatherUpdatesInput.value=String(historyFrameWeatherUpdates);
+    historyRetentionDaysInput.value=String(historyRetentionDays);
+    labelLocationLatInput.value=labelLocationLatLng ? String(labelLocationLatLng[0]) : "";
+    labelLocationLonInput.value=labelLocationLatLng ? String(labelLocationLatLng[1]) : "";
+}
+
+function startWeatherRefreshTimer(){
+    if(weatherRefreshTimer) clearInterval(weatherRefreshTimer);
+    nextWeatherUpdate=Date.now() + weatherUpdateInterval;
+    weatherRefreshTimer=setInterval(refresh,weatherUpdateInterval);
+}
+
+function startRadarRefreshTimer(){
+    if(radarRefreshTimer) clearInterval(radarRefreshTimer);
+    nextRadarUpdate=Date.now() + radarUpdateInterval;
+    radarRefreshTimer=setInterval(()=>{
+        if(radarToggle.checked) reloadRadar();
+    },radarUpdateInterval);
+}
+
+function applySetupSettings(){
+    const previousHistoryRetentionDays=historyRetentionDays;
+    weatherUpdateInterval=clampNumber(weatherUpdateMinutes.value,0.1,1440,1) * 60000;
+    radarUpdateInterval=clampNumber(radarUpdateMinutes.value,0.1,1440,5) * 60000;
+    historyRecordingEnabled=historyRecordingToggle.checked;
+    historyFrameWeatherUpdates=Math.round(clampNumber(historyFrameWeatherUpdatesInput.value,1,1440,1));
+    historyRetentionDays=Math.round(clampNumber(historyRetentionDaysInput.value,1,365,7));
+    labelLocationLatLng=getValidLatLng(labelLocationLatInput.value,labelLocationLonInput.value);
+    weatherUpdatesSinceHistoryFrame=0;
+    syncSetupControls();
+    saveSetupSettings();
+    startWeatherRefreshTimer();
+    startRadarRefreshTimer();
+    if(stateLabelsVisible) updateCurrentLocationMarker();
+    if(historyRetentionDays !== previousHistoryRetentionDays){
+        refreshHistoryRetentionWindow().catch(error=>{
+            console.warn("Unable to refresh history retention window",error);
+        });
+    }
+}
+
+function resetSetupSettings(){
+    weatherUpdateInterval=60000;
+    radarUpdateInterval=300000;
+    historyRecordingEnabled=true;
+    historyFrameWeatherUpdates=1;
+    historyRetentionDays=7;
+    labelLocationLatLng=null;
+    weatherUpdatesSinceHistoryFrame=0;
+    syncSetupControls();
+    saveSetupSettings();
+    startWeatherRefreshTimer();
+    startRadarRefreshTimer();
+    if(stateLabelsVisible) updateCurrentLocationMarker();
+}
+
+function openSetupPanel(){
+    setupPanel.classList.add('open');
+    syncSetupControls();
+}
+
+function closeSetupPanel(){
+    setupPanel.classList.remove('open');
+}
+
+function clampSetupPanel(){
+    const rect=setupPanel.getBoundingClientRect();
+    const maxLeft=Math.max(0,window.innerWidth-rect.width);
+    const maxTop=Math.max(0,window.innerHeight-rect.height);
+    const left=Math.min(Math.max(rect.left,0),maxLeft);
+    const top=Math.min(Math.max(rect.top,0),maxTop);
+
+    setupPanel.style.left=left+"px";
+    setupPanel.style.top=top+"px";
+    setupPanel.style.transform="none";
+}
+
+setupHeader.addEventListener('mousedown',(e)=>{
+    if(e.button !== 0 || e.target.closest('button')) return;
+
+    const rect=setupPanel.getBoundingClientRect();
+    setupPanel.style.left=rect.left+"px";
+    setupPanel.style.top=rect.top+"px";
+    setupPanel.style.transform="none";
+
+    isDraggingSetupPanel=true;
+    setupPanelDragOffset={
+        x:e.clientX-rect.left,
+        y:e.clientY-rect.top
+    };
+    e.preventDefault();
+});
+
+document.addEventListener('mousemove',(e)=>{
+    if(!isDraggingSetupPanel) return;
+
+    const rect=setupPanel.getBoundingClientRect();
+    const maxLeft=Math.max(0,window.innerWidth-rect.width);
+    const maxTop=Math.max(0,window.innerHeight-rect.height);
+    const left=Math.min(Math.max(e.clientX-setupPanelDragOffset.x,0),maxLeft);
+    const top=Math.min(Math.max(e.clientY-setupPanelDragOffset.y,0),maxTop);
+
+    setupPanel.style.left=left+"px";
+    setupPanel.style.top=top+"px";
+});
+
+document.addEventListener('mouseup',()=>{
+    isDraggingSetupPanel=false;
+});
+
+// ===== WEATHER PRIORITY PANEL =====
+function normalizePrioritySettings(settings){
+    const incomingOrder=Array.isArray(settings?.order) ? settings.order : [];
+    const order=[
+        ...incomingOrder.filter(category=>DEFAULT_PRIORITY_ORDER.includes(category)),
+        ...DEFAULT_PRIORITY_ORDER.filter(category=>!incomingOrder.includes(category))
+    ];
+    const colors={...DEFAULT_PRIORITY_COLORS};
+    if(settings?.colors && typeof settings.colors === "object"){
+        DEFAULT_PRIORITY_ORDER.forEach(category=>{
+            const color=settings.colors[category];
+            if(/^#[0-9a-f]{6}$/i.test(color || "")){
+                colors[category]=color;
+            }
+        });
+    }
+    return { order, colors };
+}
+
+function loadPrioritySettings(){
+    try{
+        prioritySettings=normalizePrioritySettings(JSON.parse(localStorage.getItem(PRIORITY_SETTINGS_KEY)) || {});
+    }catch(error){
+        prioritySettings=normalizePrioritySettings({});
+    }
+}
+
+function savePrioritySettings(){
+    localStorage.setItem(PRIORITY_SETTINGS_KEY,JSON.stringify(prioritySettings));
+}
+
+function formatPriorityLabel(category){
+    return category.replace(/-/g," ");
+}
+
+function renderPriorityList(){
+    if(!priorityList) return;
+    priorityList.innerHTML=prioritySettings.order.map((category,index)=>`
+        <div class="priority-row" data-category="${escapeHtml(category)}">
+            <span class="priority-rank">${index + 1}</span>
+            <span class="priority-name">${escapeHtml(formatPriorityLabel(category))}</span>
+            <input type="color" value="${escapeHtml(prioritySettings.colors[category] || DEFAULT_PRIORITY_COLORS[category])}" onchange="changePriorityColor('${escapeHtml(category)}', this.value)" aria-label="${escapeHtml(formatPriorityLabel(category))} color">
+            <span class="priority-move-buttons">
+                <button type="button" onclick="movePriorityCategory('${escapeHtml(category)}', -1)" ${index === 0 ? "disabled" : ""} aria-label="Move ${escapeHtml(formatPriorityLabel(category))} up" title="Move up">&uarr;</button>
+                <button type="button" onclick="movePriorityCategory('${escapeHtml(category)}', 1)" ${index === prioritySettings.order.length - 1 ? "disabled" : ""} aria-label="Move ${escapeHtml(formatPriorityLabel(category))} down" title="Move down">&darr;</button>
+            </span>
+        </div>
+    `).join("");
+}
+
+function applyPrioritySettings(){
+    savePrioritySettings();
+    renderPriorityList();
+    redrawMap();
+}
+
+function changePriorityColor(category,color){
+    if(!DEFAULT_PRIORITY_ORDER.includes(category) || !/^#[0-9a-f]{6}$/i.test(color || "")) return;
+    prioritySettings.colors[category]=color;
+    applyPrioritySettings();
+}
+
+function movePriorityCategory(category,direction){
+    const index=prioritySettings.order.indexOf(category);
+    const nextIndex=index + direction;
+    if(index < 0 || nextIndex < 0 || nextIndex >= prioritySettings.order.length) return;
+    const nextOrder=[...prioritySettings.order];
+    [nextOrder[index],nextOrder[nextIndex]]=[nextOrder[nextIndex],nextOrder[index]];
+    prioritySettings.order=nextOrder;
+    applyPrioritySettings();
+}
+
+function resetPrioritySettings(){
+    prioritySettings=normalizePrioritySettings({});
+    applyPrioritySettings();
+}
+
+function openPriorityPanel(){
+    priorityPanel.classList.add('open');
+    priorityPanel.classList.remove('minimized');
+    minimizedPanels.priority=false;
+    renderPriorityList();
+    updatePanelRestoreDock();
+    clampPriorityPanel();
+}
+
+function closePriorityPanel(){
+    priorityPanel.classList.remove('open','minimized');
+    minimizedPanels.priority=false;
+    updatePanelRestoreDock();
+}
+
+function minimizePriorityPanel(){
+    if(!priorityPanel.classList.contains('open')) return;
+    priorityPanel.classList.add('minimized');
+    minimizedPanels.priority=true;
+    updatePanelRestoreDock();
+}
+
+function restorePriorityPanel(){
+    priorityPanel.classList.add('open');
+    priorityPanel.classList.remove('minimized');
+    minimizedPanels.priority=false;
+    renderPriorityList();
+    updatePanelRestoreDock();
+    clampPriorityPanel();
+}
+
+function togglePriorityPanel(){
+    if(priorityPanel.classList.contains('open') && priorityPanel.classList.contains('minimized')){
+        restorePriorityPanel();
+    } else if(priorityPanel.classList.contains('open')){
+        closePriorityPanel();
+    } else {
+        openPriorityPanel();
+    }
+}
+
+function clampPriorityPanel(){
+    const rect=priorityPanel.getBoundingClientRect();
+    const maxLeft=Math.max(0,window.innerWidth-rect.width);
+    const maxTop=Math.max(0,window.innerHeight-rect.height);
+    const left=Math.min(Math.max(rect.left,0),maxLeft);
+    const top=Math.min(Math.max(rect.top,0),maxTop);
+
+    priorityPanel.style.left=left+"px";
+    priorityPanel.style.top=top+"px";
+    priorityPanel.style.transform="none";
+}
+
+priorityHeader.addEventListener('mousedown',(e)=>{
+    if(e.button !== 0 || e.target.closest('button')) return;
+
+    const rect=priorityPanel.getBoundingClientRect();
+    priorityPanel.style.left=rect.left+"px";
+    priorityPanel.style.top=rect.top+"px";
+    priorityPanel.style.transform="none";
+
+    isDraggingPriorityPanel=true;
+    priorityPanelDragOffset={
+        x:e.clientX-rect.left,
+        y:e.clientY-rect.top
+    };
+    e.preventDefault();
+});
+
+document.addEventListener('mousemove',(e)=>{
+    if(!isDraggingPriorityPanel) return;
+
+    const rect=priorityPanel.getBoundingClientRect();
+    const maxLeft=Math.max(0,window.innerWidth-rect.width);
+    const maxTop=Math.max(0,window.innerHeight-rect.height);
+    const left=Math.min(Math.max(e.clientX-priorityPanelDragOffset.x,0),maxLeft);
+    const top=Math.min(Math.max(e.clientY-priorityPanelDragOffset.y,0),maxTop);
+
+    priorityPanel.style.left=left+"px";
+    priorityPanel.style.top=top+"px";
+});
+
+document.addEventListener('mouseup',()=>{
+    isDraggingPriorityPanel=false;
+});
+
+// ===== SHORTCUT HELP PANEL =====
+const shortcutHelpPanel=document.getElementById('shortcutHelpPanel');
+const shortcutHelpHeader=document.getElementById('shortcutHelpHeader');
+
+function openShortcutHelpPanel(){
+    shortcutHelpPanel.classList.add('open');
+    clampShortcutHelpPanel();
+}
+
+function closeShortcutHelpPanel(){
+    shortcutHelpPanel.classList.remove('open');
+}
+
+function toggleShortcutHelpPanel(){
+    if(shortcutHelpPanel.classList.contains('open')){
+        closeShortcutHelpPanel();
+    } else {
+        openShortcutHelpPanel();
+    }
+}
+
+function clampShortcutHelpPanel(){
+    const rect=shortcutHelpPanel.getBoundingClientRect();
+    const maxLeft=Math.max(0,window.innerWidth-rect.width);
+    const maxTop=Math.max(0,window.innerHeight-rect.height);
+    const left=Math.min(Math.max(rect.left,0),maxLeft);
+    const top=Math.min(Math.max(rect.top,0),maxTop);
+
+    shortcutHelpPanel.style.left=left+"px";
+    shortcutHelpPanel.style.top=top+"px";
+    shortcutHelpPanel.style.right="auto";
+}
+
+shortcutHelpHeader.addEventListener('mousedown',(e)=>{
+    if(e.button !== 0 || e.target.closest('button')) return;
+
+    const rect=shortcutHelpPanel.getBoundingClientRect();
+    shortcutHelpPanel.style.left=rect.left+"px";
+    shortcutHelpPanel.style.top=rect.top+"px";
+    shortcutHelpPanel.style.right="auto";
+
+    isDraggingShortcutHelpPanel=true;
+    shortcutHelpPanelDragOffset={
+        x:e.clientX-rect.left,
+        y:e.clientY-rect.top
+    };
+    e.preventDefault();
+});
+
+document.addEventListener('mousemove',(e)=>{
+    if(!isDraggingShortcutHelpPanel) return;
+
+    const rect=shortcutHelpPanel.getBoundingClientRect();
+    const maxLeft=Math.max(0,window.innerWidth-rect.width);
+    const maxTop=Math.max(0,window.innerHeight-rect.height);
+    const left=Math.min(Math.max(e.clientX-shortcutHelpPanelDragOffset.x,0),maxLeft);
+    const top=Math.min(Math.max(e.clientY-shortcutHelpPanelDragOffset.y,0),maxTop);
+
+    shortcutHelpPanel.style.left=left+"px";
+    shortcutHelpPanel.style.top=top+"px";
+    shortcutHelpPanel.style.right="auto";
+});
+
+document.addEventListener('mouseup',()=>{
+    isDraggingShortcutHelpPanel=false;
+});
+
+loadSetupSettings();
+loadPrioritySettings();
+syncSetupControls();
+setStartupStatus("setup","Setup: loaded","done");
+
+// ===== TIMER =====
+setInterval(()=>{
+    document.querySelectorAll(".timer").forEach(el=>{
+        const exp = new Date(el.dataset.exp);
+        const referenceTime = Number(el.dataset.ref) || getActiveTimestamp();
+        let diff = (exp - referenceTime)/1000;
+
+        if(diff <= 0){
+            el.innerText = "Expired";
+            return;
+        }
+
+        const h = Math.floor(diff/3600);
+        const m = Math.floor((diff%3600)/60);
+        const s = Math.floor(diff%60);
+
+        el.innerText =
+            String(h).padStart(2,'0') + ":" +
+            String(m).padStart(2,'0') + ":" +
+            String(s).padStart(2,'0');
+    });
+},1000);
+
+// ===== UTIL =====
+function sameToFips(code){ return code.substring(1); }
+function getFips(f){ return (f.id || (f.properties.STATE + f.properties.COUNTY)).padStart(5,"0"); }
+
+function getActiveTimestamp(){
+    return historyModeActive && historyFrameTimestamp ? historyFrameTimestamp : Date.now();
+}
+
+function getHistoryRetentionMs(){
+    return historyRetentionDays * 24 * 60 * 60 * 1000;
+}
+
+function clampNumber(value,min,max,fallback){
+    const number=Number(value);
+    if(!Number.isFinite(number)) return fallback;
+    return Math.min(Math.max(number,min),max);
+}
+
+function getValidLatLng(latValue,lonValue){
+    const lat=Number(latValue);
+    const lon=Number(lonValue);
+    if(!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+    if(lat < -90 || lat > 90 || lon < -180 || lon > 180) return null;
+    return [lat,lon];
+}
+
+function getAlertIdHashInput(value){
+    const raw=String(value || "");
+    let normalized=raw;
+    try{
+        normalized=decodeURIComponent(raw);
+    }catch(error){
+        normalized=raw;
+    }
+    const urnIndex=normalized.toLowerCase().indexOf("urn:oid");
+    return urnIndex >= 0 ? normalized.slice(urnIndex) : normalized;
+}
+
+function hashAlertId(str){
+    str=getAlertIdHashInput(str);
+    return hashText(str);
+}
+
+function hashText(str){
+    str=String(str || "");
+    let hash=0;
+    for(let i=0;i<str.length;i++){
+        hash=(hash<<5)-hash+str.charCodeAt(i);
+        hash|=0;
+    }
+    return (hash>>>0).toString(16);
+}
+
+function stableStringify(value){
+    if(value === null || typeof value !== "object") return JSON.stringify(value);
+    if(Array.isArray(value)) return "[" + value.map(stableStringify).join(",") + "]";
+    return "{" + Object.keys(value).sort().map(key=>
+        JSON.stringify(key) + ":" + stableStringify(value[key])
+    ).join(",") + "}";
+}
+
+function getAlertMessageHash(alert){
+    return hashText(stableStringify(alert || {}));
+}
+
+function getAlertDescriptionHash(alert){
+    return hashText(alert?.description || "");
+}
+
+function renderAlertMessageHashLine(alert){
+    return `<b>Message hash:</b> <span class="alert-reference-tree-hash">${escapeHtml(getAlertMessageHash(alert))}</span><br>`;
+}
+
+function renderAlertDescriptionHashLine(alert){
+    return `<b>Description hash:</b> <span class="alert-reference-tree-hash">${escapeHtml(getAlertDescriptionHash(alert))}</span><br>`;
+}
+
+function getAlertReferenceHashes(alert){
+    const hashes=(Array.isArray(alert?.references) ? alert.references : [])
+        .map(reference=>{
+            if(typeof reference === "string") return reference;
+            return reference?.identifier || reference?.["@id"] || reference?.id || "";
+        })
+        .filter(Boolean)
+        .map(hashAlertId);
+    return [...new Set(hashes)];
+}
+
+function renderAlertReferenceHashLinks(alert){
+    const hashes=getAlertReferenceHashes(alert);
+    if(!hashes.length) return "None";
+    return hashes.map(hash=>
+        `<button class="alert-reference-link" type="button" data-alert-ref-hash="${escapeHtml(hash)}" title="Search history for alert ${escapeHtml(hash)}">${escapeHtml(hash)}</button>`
+    ).join(", ");
+}
+
+function getAlertDisplayHash(alert){
+    return hashAlertId(alert?.id || getAlertCountId(alert));
+}
+
+function renderAlertIdHashLink(alert){
+    const hash=getAlertDisplayHash(alert);
+    return `<a class="alert-id-link" href="#alert-reference-tree-${encodeURIComponent(hash)}" data-alert-id-hash="${escapeHtml(hash)}" title="Show reference tree for alert ${escapeHtml(hash)}">${escapeHtml(hash)}</a>`;
+}
+
+function renderAlertHashPopupLink(hash){
+    const normalizedHash=String(hash || "").trim().toLowerCase();
+    if(!normalizedHash) return "N/A";
+    return `<a class="alert-reference-link alert-reference-tree-hash" href="#alert-${encodeURIComponent(normalizedHash)}" data-alert-ref-hash="${escapeHtml(normalizedHash)}" title="Show alert ${escapeHtml(normalizedHash)}">${escapeHtml(normalizedHash)}</a>`;
+}
+
+function isExpired(a){
+    return a.expires && new Date(a.expires).getTime() < getActiveTimestamp();
+}
+
+function cloneJson(value){
+    return JSON.parse(JSON.stringify(value));
+}
+
+function formatDateTimeLocal(timestamp){
+    const d=new Date(timestamp);
+    const local=new Date(d.getTime() - d.getTimezoneOffset() * 60000);
+    return local.toISOString().slice(0,16);
+}
+
+function parseDateTimeLocal(value){
+    return value ? new Date(value).getTime() : NaN;
+}
+
+function formatWmsTime(timestamp){
+    const rounded=Math.floor(timestamp / 300000) * 300000;
+    return new Date(rounded).toISOString().replace(/\.\d{3}Z$/,"Z");
+}
+
+function nextPaint(){
+    return new Promise(resolve=>requestAnimationFrame(()=>resolve()));
+}
+
+function runWhenIdle(callback,timeout=1200){
+    if("requestIdleCallback" in window){
+        window.requestIdleCallback(callback,{ timeout });
+    } else {
+        setTimeout(callback,0);
+    }
+}
+
+function setStartupStatus(key,message,state="loading"){
+    const element=document.getElementById("startupStatus" + key.charAt(0).toUpperCase() + key.slice(1));
+    if(!element) return;
+    const label=element.querySelector(".startup-status-label");
+    if(label){
+        label.textContent=message;
+    } else {
+        element.textContent=message;
+    }
+    element.classList.toggle("done",state === "done");
+    element.classList.toggle("error",state === "error");
+    startupStatusState[key]=state === "done" || state === "error";
+    updateStartupProgress();
+    maybeHideStartupStatus();
+}
+
+function maybeHideStartupStatus(){
+    const status=document.getElementById("startupStatus");
+    if(!status) return;
+    if(Object.values(startupStatusState).every(Boolean)){
+        setTimeout(()=>status.classList.add("hidden"),900);
+    }
+}
+
+function updateStartupProgress(){
+    const total=Object.keys(startupStatusState).length;
+    const complete=Object.values(startupStatusState).filter(Boolean).length;
+    const percent=Math.round((complete / Math.max(1,total)) * 100);
+    const bar=document.getElementById("startupProgressBar");
+    const text=document.getElementById("startupProgressText");
+    if(bar) bar.style.width=percent + "%";
+    if(text) text.textContent=percent + "% complete";
+}
+
+function setStartupTaskProgress(key,percent){
+    const bar=document.getElementById("startupProgress" + key.charAt(0).toUpperCase() + key.slice(1));
+    if(!bar) return;
+    bar.style.width=Math.min(Math.max(Math.round(percent),0),100) + "%";
+}
+
+function openHistoryDb(){
+    return new Promise((resolve,reject)=>{
+        const request=indexedDB.open(HISTORY_DB_NAME,HISTORY_DB_VERSION);
+        request.onupgradeneeded=(event)=>{
+            const db=request.result;
+            if(!db.objectStoreNames.contains(HISTORY_STORE_NAME)){
+                db.createObjectStore(HISTORY_STORE_NAME,{ keyPath:"timestamp" });
+            }
+            let radarTileStore;
+            if(!db.objectStoreNames.contains(RADAR_TILE_STORE_NAME)){
+                radarTileStore=db.createObjectStore(RADAR_TILE_STORE_NAME,{ keyPath:"id" });
+            } else {
+                radarTileStore=request.transaction.objectStore(RADAR_TILE_STORE_NAME);
+            }
+            if(!radarTileStore.indexNames.contains("timestamp")){
+                radarTileStore.createIndex("timestamp","timestamp");
+            }
+            let alertHashStore;
+            if(!db.objectStoreNames.contains(HISTORY_ALERT_HASH_STORE_NAME)){
+                alertHashStore=db.createObjectStore(HISTORY_ALERT_HASH_STORE_NAME,{ keyPath:"hash" });
+            } else {
+                alertHashStore=request.transaction.objectStore(HISTORY_ALERT_HASH_STORE_NAME);
+            }
+            if(!alertHashStore.indexNames.contains("latestTimestamp")){
+                alertHashStore.createIndex("latestTimestamp","latestTimestamp");
+            }
+            if(event.oldVersion && event.oldVersion < 5){
+                alertHashStore.clear();
+            }
+        };
+        request.onsuccess=()=>resolve(request.result);
+        request.onerror=()=>reject(request.error);
+    });
+}
+
+async function withHistoryStore(mode,callback,storeName=HISTORY_STORE_NAME){
+    const db=await openHistoryDb();
+    return new Promise((resolve,reject)=>{
+        const tx=db.transaction(storeName,mode);
+        const store=tx.objectStore(storeName);
+        const result=callback(store);
+        tx.oncomplete=()=>{
+            db.close();
+            resolve(result);
+        };
+        tx.onerror=()=>{
+            db.close();
+            reject(tx.error);
+        };
+    });
+}
+
+async function withHistoryStores(storeNames,mode,callback){
+    const db=await openHistoryDb();
+    return new Promise((resolve,reject)=>{
+        const tx=db.transaction(storeNames,mode);
+        const stores={};
+        storeNames.forEach(name=>{ stores[name]=tx.objectStore(name); });
+        const result=callback(stores);
+        tx.oncomplete=()=>{
+            db.close();
+            resolve(result);
+        };
+        tx.onerror=()=>{
+            db.close();
+            reject(tx.error);
+        };
+    });
+}
+
+function getRadarTileUrl(coords,timestamp){
+    return RADAR_TILE_URL
+        .replace("{z}",coords.z)
+        .replace("{x}",coords.x)
+        .replace("{y}",coords.y) + "?_t=" + timestamp;
+}
+
+function getRadarTileId(frameId,coords){
+    return frameId + ":" + coords.z + ":" + coords.x + ":" + coords.y;
+}
+
+function getCurrentRadarTileCoords(){
+    const zoom=Math.round(map.getZoom());
+    const tileSize=256;
+    const pixelBounds=map.getPixelBounds();
+    const tileBounds=L.bounds(
+        pixelBounds.min.divideBy(tileSize).floor(),
+        pixelBounds.max.divideBy(tileSize).floor()
+    );
+    const coords=[];
+    for(let x=tileBounds.min.x;x<=tileBounds.max.x;x++){
+        for(let y=tileBounds.min.y;y<=tileBounds.max.y;y++){
+            coords.push({ x, y, z:zoom });
+        }
+    }
+    return coords;
+}
+
+async function storeRadarTilesForFrame(frameId,timestamp){
+    if(!radarToggle.checked) return [];
+
+    const coords=getCurrentRadarTileCoords();
+    const tiles=[];
+    await Promise.all(coords.map(async coord=>{
+        try{
+            const response=await fetch(getRadarTileUrl(coord,timestamp),{ cache:"reload" });
+            if(!response.ok) return;
+            const blob=await response.blob();
+            tiles.push({
+                id:getRadarTileId(frameId,coord),
+                frameId,
+                timestamp,
+                coord,
+                blob,
+                contentType:blob.type || "image/png"
+            });
+        }catch(error){
+            console.warn("Unable to store radar tile",coord,error);
+        }
+    }));
+
+    if(tiles.length){
+        await withHistoryStore("readwrite",(store)=>{
+            tiles.forEach(tile=>store.put(tile));
+        },RADAR_TILE_STORE_NAME);
+    }
+    return coords;
+}
+
+async function pruneOldRadarTiles(cutoff){
+    try{
+        await withHistoryStore("readwrite",(store)=>{
+            const request=store.index("timestamp").openCursor(IDBKeyRange.upperBound(cutoff));
+            request.onsuccess=()=>{
+                const cursor=request.result;
+                if(!cursor) return;
+                cursor.delete();
+                cursor.continue();
+            };
+        },RADAR_TILE_STORE_NAME);
+    }catch(error){
+        console.warn("Unable to prune old radar tiles",error);
+    }
+}
+
+async function pruneOldHistorySnapshots(){
+    const cutoff=Date.now() - getHistoryRetentionMs();
+    await withHistoryStore("readwrite",(store)=>{
+        store.delete(IDBKeyRange.upperBound(cutoff));
+    });
+    await pruneOldRadarTiles(cutoff);
+    await pruneStoredHistoryAlertHashIndex(cutoff);
+    pruneHistoryAlertHashMemoryIndex(cutoff);
+}
+
+async function getStoredRadarTileBlob(frameId,coords){
+    let blob=null;
+    await withHistoryStore("readonly",(store)=>{
+        const request=store.get(getRadarTileId(frameId,coords));
+        request.onsuccess=()=>{
+            blob=request.result?.blob || null;
+        };
+    },RADAR_TILE_STORE_NAME);
+    return blob;
+}
+
+async function saveHistorySnapshot(alerts,timestamp=Date.now()){
+    try{
+        const clearGeneration=historyClearGeneration;
+        const snapshot={
+            timestamp,
+            kind:"weather",
+            scope:"US",
+            alerts:cloneJson(alerts),
+            view:{
+                lat:map.getCenter().lat,
+                lng:map.getCenter().lng,
+                zoom:map.getZoom()
+            },
+            radar:{
+                enabled:radarToggle.checked,
+                opacity:Number(radarOpacity.value) / 100,
+                timestamp:currentRadarTimestamp,
+                wmsTime:formatWmsTime(currentRadarTimestamp),
+                source:"IEM WMS-T"
+            },
+            mapType:mapTypeSelector.value
+        };
+
+        await withHistoryStore("readwrite",(store)=>{
+            store.put(snapshot);
+            store.delete(IDBKeyRange.upperBound(timestamp - getHistoryRetentionMs()));
+        });
+        if(clearGeneration !== historyClearGeneration){
+            await withHistoryStore("readwrite",(store)=>{
+                store.delete(timestamp);
+            });
+            return;
+        }
+        const cutoff=timestamp - getHistoryRetentionMs();
+        try{
+            await pruneStoredHistoryAlertHashIndex(cutoff);
+            pruneHistoryAlertHashMemoryIndex(cutoff);
+            await saveHistoryAlertHashFrameEntries(snapshot);
+        }catch(indexError){
+            console.warn("Unable to update alert hash index",indexError);
+        }
+        updateHistoryCachesWithSnapshot(snapshot);
+    }catch(error){
+        console.warn("Unable to save history snapshot",error);
+    }
+}
+
+function createHistoryFrameMetadata(frame){
+    const tornadoWarningCounties=[];
+    Object.entries(frame.alerts || {}).forEach(([fips,alerts])=>{
+        if(alerts.some(alert=>getPriorityCategory(alert.event) === "tornado-warning")){
+            tornadoWarningCounties.push(fips);
+        }
+    });
+
+    return {
+        timestamp:frame.timestamp,
+        kind:frame.kind || "weather",
+        scope:frame.scope || "US",
+        radar:frame.radar || null,
+        mapType:frame.mapType || "",
+        alertCount:getUniqueAlertCount(frame.alerts || {}),
+        tornadoWarningCounties
+    };
+}
+
+function cacheHistoryFrame(frame){
+    historyFrameCache.set(frame.timestamp,frame);
+    if(historyFrameCache.size > HISTORY_FRAME_CACHE_LIMIT){
+        const oldestKey=historyFrameCache.keys().next().value;
+        historyFrameCache.delete(oldestKey);
+    }
+}
+
+function addHistoryFrameToAlertHashIndex(frame){
+    if(!historyAlertHashIndex || !frame || !Number.isFinite(frame.timestamp)) return;
+
+    Object.entries(frame.alerts || {}).forEach(([fips,alerts])=>{
+        if(!Array.isArray(alerts)) return;
+        alerts.forEach(alert=>{
+            const id=alert?.id || getAlertCountId(alert);
+            const hash=hashAlertId(id).toLowerCase();
+            const existing=historyAlertHashIndex.get(hash);
+            if(existing && existing.timestamp >= frame.timestamp) return;
+            historyAlertHashIndex.set(hash,{ timestamp:frame.timestamp, fips, id });
+        });
+    });
+}
+
+function pruneHistoryAlertHashMemoryIndex(cutoff){
+    if(!historyAlertHashIndex) return;
+    for(const [hash,entry] of historyAlertHashIndex.entries()){
+        if(!entry || !Number.isFinite(entry.timestamp) || entry.timestamp <= cutoff){
+            historyAlertHashIndex.delete(hash);
+        }
+    }
+}
+
+function collectHistoryAlertHashEntries(frame){
+    const entriesByHash=new Map();
+    if(!frame || !Number.isFinite(frame.timestamp)) return entriesByHash;
+
+    Object.entries(frame.alerts || {}).forEach(([fips,alerts])=>{
+        if(!Array.isArray(alerts)) return;
+        alerts.forEach(alert=>{
+            const id=alert?.id || getAlertCountId(alert);
+            const hash=hashAlertId(id).toLowerCase();
+            if(!entriesByHash.has(hash)) entriesByHash.set(hash,[]);
+            entriesByHash.get(hash).push({ timestamp:frame.timestamp, fips, id });
+        });
+    });
+
+    return entriesByHash;
+}
+
+function getNewestHistoryAlertHashEntry(entries){
+    return (Array.isArray(entries) ? entries : [])
+        .filter(entry=>entry && Number.isFinite(entry.timestamp))
+        .sort((a,b)=>b.timestamp-a.timestamp)[0] || null;
+}
+
+function normalizeHistoryAlertHashRecord(hash,entries,cutoff=Date.now() - getHistoryRetentionMs()){
+    const seen=new Set();
+    const normalized=(Array.isArray(entries) ? entries : [])
+        .filter(entry=>entry && Number.isFinite(entry.timestamp) && entry.timestamp > cutoff)
+        .filter(entry=>{
+            const key=[entry.timestamp,entry.fips || "",entry.id || ""].join("|");
+            if(seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        })
+        .sort((a,b)=>b.timestamp-a.timestamp);
+    const latest=getNewestHistoryAlertHashEntry(normalized);
+    return {
+        hash,
+        entries:normalized,
+        latestTimestamp:latest?.timestamp || 0
+    };
+}
+
+async function buildHistoryAlertHashIndex(){
+    const cutoff=Date.now() - getHistoryRetentionMs();
+    const index=new Map();
+    let latestIndexedTimestamp=-Infinity;
+
+    await withHistoryStore("readwrite",(store)=>{
+        const request=store.openCursor();
+        request.onsuccess=()=>{
+            const cursor=request.result;
+            if(!cursor) return;
+
+            const record=cursor.value || {};
+            const hash=record.hash || cursor.key;
+            const normalized=normalizeHistoryAlertHashRecord(hash,record.entries,cutoff);
+            const latest=getNewestHistoryAlertHashEntry(normalized.entries);
+            if(latest){
+                index.set(normalized.hash,latest);
+                latestIndexedTimestamp=Math.max(latestIndexedTimestamp,normalized.latestTimestamp);
+                if(normalized.entries.length !== (record.entries || []).length ||
+                   normalized.latestTimestamp !== record.latestTimestamp){
+                    cursor.update(normalized);
+                }
+            } else {
+                cursor.delete();
+            }
+
+            cursor.continue();
+        };
+    },HISTORY_ALERT_HASH_STORE_NAME);
+
+    historyAlertHashIndex=index;
+    await indexHistoryAlertHashesFromSnapshots(latestIndexedTimestamp);
+    return historyAlertHashIndex;
+}
+
+async function pruneStoredHistoryAlertHashIndex(cutoff=Date.now() - getHistoryRetentionMs()){
+    await withHistoryStore("readwrite",(store)=>{
+        const request=store.openCursor();
+        request.onsuccess=()=>{
+            const cursor=request.result;
+            if(!cursor) return;
+
+            const record=cursor.value || {};
+            const hash=record.hash || cursor.key;
+            const normalized=normalizeHistoryAlertHashRecord(hash,record.entries,cutoff);
+            if(normalized.entries.length){
+                if(normalized.entries.length !== (record.entries || []).length ||
+                   normalized.latestTimestamp !== record.latestTimestamp){
+                    cursor.update(normalized);
+                }
+            } else {
+                cursor.delete();
+            }
+
+            cursor.continue();
+        };
+    },HISTORY_ALERT_HASH_STORE_NAME);
+}
+
+async function saveHistoryAlertHashFrameEntries(frame){
+    const entriesByHash=collectHistoryAlertHashEntries(frame);
+    await saveHistoryAlertHashEntriesByHash(entriesByHash);
+}
+
+async function saveHistoryAlertHashEntriesByHash(entriesByHash){
+    if(!entriesByHash.size) return;
+    const cutoff=Date.now() - getHistoryRetentionMs();
+
+    await withHistoryStore("readwrite",(store)=>{
+        entriesByHash.forEach((entries,hash)=>{
+            const request=store.get(hash);
+            request.onsuccess=()=>{
+                const existing=request.result;
+                const record=normalizeHistoryAlertHashRecord(hash,[...(existing?.entries || []),...entries],cutoff);
+                if(record.entries.length){
+                    store.put(record);
+                } else {
+                    store.delete(hash);
+                }
+            };
+        });
+    },HISTORY_ALERT_HASH_STORE_NAME);
+}
+
+async function loadHistoryAlertHashIndexChunk(afterTimestamp,limit=300){
+    const entriesByHash=new Map();
+    let lastTimestamp=afterTimestamp;
+    let count=0;
+    let hasMore=false;
+
+    await withHistoryStore("readonly",(store)=>{
+        const range=Number.isFinite(afterTimestamp) ? IDBKeyRange.lowerBound(afterTimestamp + 1) : null;
+        const request=store.openCursor(range);
+        request.onsuccess=()=>{
+            const cursor=request.result;
+            if(!cursor) return;
+
+            if(count >= limit){
+                hasMore=true;
+                return;
+            }
+
+            const frame=cursor.value;
+            if(frame && Number.isFinite(frame.timestamp)){
+                count++;
+                lastTimestamp=frame.timestamp;
+                addHistoryFrameToAlertHashIndex(frame);
+                collectHistoryAlertHashEntries(frame).forEach((entries,hash)=>{
+                    if(!entriesByHash.has(hash)) entriesByHash.set(hash,[]);
+                    entriesByHash.get(hash).push(...entries);
+                });
+            }
+
+            cursor.continue();
+        };
+    });
+
+    return { entriesByHash, lastTimestamp, hasMore };
+}
+
+async function indexHistoryAlertHashesFromSnapshots(sinceTimestamp){
+    let afterTimestamp=Number.isFinite(sinceTimestamp) ? sinceTimestamp : -Infinity;
+
+    while(true){
+        const chunk=await loadHistoryAlertHashIndexChunk(afterTimestamp);
+        await saveHistoryAlertHashEntriesByHash(chunk.entriesByHash);
+        if(!chunk.hasMore) break;
+        afterTimestamp=chunk.lastTimestamp;
+    }
+}
+
+async function getHistoryAlertHashIndex(){
+    if(historyAlertHashIndex) return historyAlertHashIndex;
+    if(historyAlertHashIndexLoadPromise) return historyAlertHashIndexLoadPromise;
+
+    const clearGeneration=historyClearGeneration;
+    historyAlertHashIndexLoadPromise=buildHistoryAlertHashIndex()
+        .then(index=>{
+            historyAlertHashIndex=clearGeneration === historyClearGeneration ? index : new Map();
+            return historyAlertHashIndex;
+        })
+        .finally(()=>{
+            historyAlertHashIndexLoadPromise=null;
+        });
+
+    return historyAlertHashIndexLoadPromise;
+}
+
+function mergeHistoryIndexFrames(frames){
+    historyIndexCache=normalizeHistoryFrames([...historyIndexCache,...frames]);
+    return historyIndexCache;
+}
+
+function getCachedHistorySnapshots(sinceTimestamp=null){
+    const cutoff=Date.now() - getHistoryRetentionMs();
+    return historyIndexCache.filter(frame=>{
+        if(!frame || !Number.isFinite(frame.timestamp)) return false;
+        if(frame.timestamp < cutoff) return false;
+        if(Number.isFinite(sinceTimestamp) && frame.timestamp <= sinceTimestamp) return false;
+        return true;
+    });
+}
+
+function getCachedPlotHistoryFrames(sinceTimestamp=null){
+    const cutoff=Date.now() - getHistoryRetentionMs();
+    const frames=(plotHistoryCache.frames || []).filter(frame=>{
+        if(!frame || !Number.isFinite(frame.timestamp)) return false;
+        if(frame.timestamp < cutoff) return false;
+        if(Number.isFinite(sinceTimestamp) && frame.timestamp <= sinceTimestamp) return false;
+        return true;
+    });
+    return {
+        frames,
+        titleCounts:getPlotTitleCountsFromFrames(frames)
+    };
+}
+
+function getAlertCountId(alert){
+    const title=alert?.event || "Untitled";
+    return alert?.id || [title,alert?.sent,alert?.expires,alert?.headline].join("|");
+}
+
+function getAlertTitleSummary(alertsByFips,options={}){
+    const { displayableCountiesOnly=false }=options;
+    const alertsByTitle={};
+    const countiesByTitle={};
+
+    Object.entries(alertsByFips || {}).forEach(([fips,countyAlerts])=>{
+        if(displayableCountiesOnly && !isEventTitleDisplayableCounty(fips)) return;
+        if(!Array.isArray(countyAlerts)) return;
+        countyAlerts.forEach(alert=>{
+            if(!alert || typeof alert !== "object") return;
+            const title=alert.event || "Untitled";
+            if(!alertsByTitle[title]) alertsByTitle[title]=new Set();
+            if(!countiesByTitle[title]) countiesByTitle[title]=new Set();
+            alertsByTitle[title].add(getAlertCountId(alert));
+            countiesByTitle[title].add(fips);
+        });
+    });
+
+    const alertTitleCounts={};
+    const countyTitleCounts={};
+    Object.keys(alertsByTitle).forEach(title=>{
+        alertTitleCounts[title]=alertsByTitle[title].size;
+        countyTitleCounts[title]=countiesByTitle[title]?.size || 0;
+    });
+
+    return { alertTitleCounts, countyTitleCounts };
+}
+
+function isEventTitleDisplayableCounty(fips){
+    return !!countyFeatureByFips[fips];
+}
+
+function getEventTitleDisplayableCountyCounts(alertsByFips){
+    const countiesByTitle={};
+
+    Object.entries(alertsByFips || {}).forEach(([fips,countyAlerts])=>{
+        if(!isEventTitleDisplayableCounty(fips) || !Array.isArray(countyAlerts)) return;
+        countyAlerts.forEach(alert=>{
+            if(!alert || typeof alert !== "object") return;
+            const title=alert.event || "Untitled";
+            if(!countiesByTitle[title]) countiesByTitle[title]=new Set();
+            countiesByTitle[title].add(fips);
+        });
+    });
+
+    return Object.fromEntries(
+        Object.entries(countiesByTitle).map(([title,counties])=>[title,counties.size])
+    );
+}
+
+function getUniqueAlertCount(alertsByFips){
+    const ids=new Set();
+    Object.values(alertsByFips || {}).forEach(countyAlerts=>{
+        if(!Array.isArray(countyAlerts)) return;
+        countyAlerts.forEach(alert=>{
+            if(alert && typeof alert === "object") ids.add(getAlertCountId(alert));
+        });
+    });
+    return ids.size;
+}
+
+async function refreshHistoryRetentionWindow(){
+    if(historyIndexLoading || plotHistoryLoading){
+        setTimeout(()=>{
+            refreshHistoryRetentionWindow().catch(error=>{
+                console.warn("Unable to refresh history retention window",error);
+            });
+        },250);
+        return;
+    }
+
+    await pruneOldHistorySnapshots();
+    historyFrameCache.clear();
+    historyAlertHashIndex=null;
+    historyAlertHashIndexLoadPromise=null;
+    historyIndexCache=[];
+    historyIndexReady=false;
+    historyIndexLoadPromise=null;
+    plotHistoryCache={ frames:[], titleCounts:new Map() };
+    plotHistoryReady=false;
+    plotHistoryLoadPromise=null;
+    historyMapCache={ frames:[], titleCounts:new Map() };
+    historyMapReady=false;
+    historyMapCacheLoadPromise=null;
+
+    const shouldRefreshOpenHistory=historyPanel.classList.contains('open');
+    if(shouldRefreshOpenHistory){
+        historyPanelLoading=true;
+        historyFrames=[];
+        historyStart.value="";
+        historyStop.value="";
+        updateHistoryPanelState();
+        await nextPaint();
+    }
+
+    await startHistoryIndexBackgroundLoad();
+    await startPlotHistoryBackgroundLoad();
+
+    if(shouldRefreshOpenHistory){
+        historyPanelLoading=false;
+        historyFrames=getCachedHistorySnapshots();
+        updateHistoryPanelState();
+        if(historyFrames.length){
+            await showHistoryFrame(historyFrames.length - 1);
+        }
+    }
+    syncOpenPlotPanelFromCache();
+}
+
+function syncOpenHistoryPanelFromCache(){
+    if(!historyPanel.classList.contains('open') || historyPanelLoading) return;
+    const cachedFrames=getCachedHistorySnapshots();
+    const previousLatestTimestamp=historyFrames[historyFrames.length - 1]?.timestamp;
+    const shouldExtendStop=shouldAutoExtendHistoryStop(previousLatestTimestamp);
+    const wasEmpty=!historyFrames.length;
+    const wasAtLatest=wasEmpty || (Number(historySlider.value) || 0) === historyFrames.length - 1;
+
+    historyFrames=cachedFrames;
+    if(shouldExtendStop && historyFrames.length){
+        historyStop.value=formatDateTimeLocal(historyFrames[historyFrames.length - 1].timestamp);
+    }
+    updateHistoryPanelState();
+    if(wasAtLatest && historyFrames.length && historyFrames[historyFrames.length - 1].timestamp !== previousLatestTimestamp){
+        showHistoryFrame(historyFrames.length - 1).catch(error=>{
+            console.warn("Unable to show latest cached history frame",error);
+        });
+    }
+}
+
+function syncOpenPlotPanelFromCache(){
+    if(!plotPanel.classList.contains('open') || plotPanelLoading || !plotHistoryReady) return;
+    const previousLatestTimestamp=plotFrames[plotFrames.length - 1]?.timestamp;
+    const shouldExtendStop=shouldAutoExtendPlotStop(previousLatestTimestamp);
+    applyPlotHistory(getCachedPlotHistoryFrames(),shouldExtendStop);
+    drawEventPlot();
+}
+
+function updateHistoryCachesWithSnapshot(snapshot){
+    const metadata=createHistoryFrameMetadata(snapshot);
+    mergeHistoryIndexFrames([metadata]);
+    cacheHistoryFrame(snapshot);
+    addHistoryFrameToAlertHashIndex(snapshot);
+
+    const plotCounts=getHistoryFramePlotCounts(snapshot);
+    plotHistoryCache.frames=normalizeHistoryFrames([
+        ...(plotHistoryCache.frames || []),
+        {
+            timestamp:snapshot.timestamp,
+            alertTitleCounts:plotCounts.alertTitleCounts,
+            countyTitleCounts:plotCounts.countyTitleCounts
+        }
+    ]);
+    plotHistoryCache.titleCounts=getPlotTitleCountsFromFrames(plotHistoryCache.frames);
+    historyMapCache.frames=normalizeHistoryFrames([
+        ...(historyMapCache.frames || []),
+        getHistoryMapFrameFromSnapshot(snapshot)
+    ]);
+    historyMapCache.titleCounts=getHistoryMapTitleCountsFromFrames(historyMapCache.frames);
+    historyMapReady=true;
+    populateHistoryMapEventTypeOptions(historyMapCache.titleCounts);
+    syncOpenHistoryPanelFromCache();
+    syncOpenPlotPanelFromCache();
+}
+
+async function loadHistoryFrame(timestamp){
+    if(historyFrameCache.has(timestamp)){
+        const frame=historyFrameCache.get(timestamp);
+        historyFrameCache.delete(timestamp);
+        historyFrameCache.set(timestamp,frame);
+        return frame;
+    }
+
+    let frame=null;
+    await withHistoryStore("readonly",(store)=>{
+        const request=store.get(timestamp);
+        request.onsuccess=()=>{
+            const result=request.result;
+            if(result && result.alerts && typeof result.alerts === "object"){
+                frame=result;
+            }
+        };
+    });
+
+    if(frame) cacheHistoryFrame(frame);
+    return frame;
+}
+
+async function findHistoryAlertByHash(alertHash){
+    const normalizedHash=String(alertHash || "").trim().toLowerCase();
+    if(!normalizedHash) return null;
+
+    const index=await getHistoryAlertHashIndex();
+    const entry=index.get(normalizedHash);
+    if(!entry) return null;
+
+    const frame=await loadHistoryFrame(entry.timestamp);
+    const primaryAlerts=frame?.alerts?.[entry.fips] || [];
+    const alert=primaryAlerts.find(candidate=>{
+        const id=candidate?.id || getAlertCountId(candidate);
+        return id === entry.id || hashAlertId(id).toLowerCase() === normalizedHash;
+    });
+    if(alert) return { alert, fips:entry.fips, frame };
+
+    for(const [fips,alerts] of Object.entries(frame?.alerts || {})){
+        if(!Array.isArray(alerts)) continue;
+        const fallback=alerts.find(candidate=>{
+            const id=candidate?.id || getAlertCountId(candidate);
+            return hashAlertId(id).toLowerCase() === normalizedHash;
+        });
+        if(fallback) return { alert:fallback, fips, frame };
+    }
+
+    index.delete(normalizedHash);
+    return null;
+}
+
+function findActiveAlertByHash(alertHash){
+    const normalizedHash=String(alertHash || "").trim().toLowerCase();
+    if(!normalizedHash) return null;
+
+    const sources=[
+        { alertsByFips:rawData, timestamp:historyModeActive && historyFrameTimestamp ? historyFrameTimestamp : Date.now(), source:"current" },
+        { alertsByFips:liveRawData, timestamp:Date.now(), source:"live" }
+    ];
+
+    for(const source of sources){
+        for(const [fips,alerts] of Object.entries(source.alertsByFips || {})){
+            if(!Array.isArray(alerts)) continue;
+            for(const alert of alerts){
+                if(getAlertDisplayHash(alert).toLowerCase() !== normalizedHash) continue;
+                return {
+                    alert,
+                    fips,
+                    frame:{
+                        timestamp:source.timestamp,
+                        source:source.source
+                    }
+                };
+            }
+        }
+    }
+
+    return null;
+}
+
+async function findAnyAlertByHash(alertHash){
+    return findActiveAlertByHash(alertHash) || await findHistoryAlertByHash(alertHash);
+}
+
+function normalizeHistoryFrames(frames){
+    const framesByMinute=new Map();
+    frames.forEach(frame=>{
+        const minute=Math.floor(frame.timestamp / HISTORY_FRAME_DEDUP_MS);
+        const existing=framesByMinute.get(minute);
+        if(!existing || (frame.kind === "weather" && existing.kind !== "weather")){
+            framesByMinute.set(minute,frame);
+        }
+    });
+    return [...framesByMinute.values()].sort((a,b)=>a.timestamp-b.timestamp);
+}
+
+async function loadHistorySnapshotsFromDb(sinceTimestamp=null,onProgress=null){
+    try{
+        let frames=[];
+        const cutoff=Date.now() - getHistoryRetentionMs();
+        const lowerBound=Number.isFinite(sinceTimestamp)
+            ? Math.max(cutoff,sinceTimestamp + 1)
+            : cutoff;
+        await withHistoryStore("readonly",(store)=>{
+            let total=0;
+            let processed=0;
+            const countRequest=store.count(IDBKeyRange.lowerBound(lowerBound));
+            countRequest.onsuccess=()=>{
+                total=countRequest.result || 0;
+                if(typeof onProgress === "function") onProgress(total ? 1 : 100);
+            };
+            const request=store.openCursor(IDBKeyRange.lowerBound(lowerBound));
+            request.onsuccess=()=>{
+                const cursor=request.result;
+                if(!cursor){
+                    if(typeof onProgress === "function") onProgress(100);
+                    return;
+                }
+                processed++;
+                const frame=cursor.value;
+                if(frame && Number.isFinite(frame.timestamp) && frame.alerts && typeof frame.alerts === "object"){
+                    if(Number.isFinite(sinceTimestamp) && frame.timestamp <= sinceTimestamp){
+                        if(typeof onProgress === "function" && total && processed % 25 === 0){
+                            onProgress((processed / total) * 100);
+                        }
+                        cursor.continue();
+                        return;
+                    }
+                    frames.push(createHistoryFrameMetadata(frame));
+                }
+                if(typeof onProgress === "function" && total && processed % 25 === 0){
+                    onProgress((processed / total) * 100);
+                }
+                cursor.continue();
+            };
+        });
+        return normalizeHistoryFrames(frames);
+    }catch(error){
+        console.warn("Unable to load history snapshots",error);
+        return [];
+    }
+}
+
+async function loadHistorySnapshots(sinceTimestamp=null){
+    const cachedFrames=getCachedHistorySnapshots(sinceTimestamp);
+    if(historyIndexReady || cachedFrames.length){
+        return cachedFrames;
+    }
+    return loadHistorySnapshotsFromDb(sinceTimestamp);
+}
+
+function getPlotFrameTitleCounts(frame,mode=getPlotCountMode()){
+    if(mode === "counties") return frame.countyTitleCounts || {};
+    return frame.alertTitleCounts || frame.eventTitleCounts || {};
+}
+
+function getPlotCountMode(){
+    return plotCountMode?.value === "counties" ? "counties" : "alerts";
+}
+
+function getPlotCountModeLabel(){
+    return getPlotCountMode() === "counties" ? "counties" : "alerts";
+}
+
+function getPlotTitleCountsFromFrames(frames,mode=getPlotCountMode()){
+    const titleCounts=new Map();
+    frames.forEach(frame=>{
+        Object.entries(getPlotFrameTitleCounts(frame,mode)).forEach(([title,count])=>{
+            titleCounts.set(title,(titleCounts.get(title) || 0) + count);
+        });
+    });
+    return titleCounts;
+}
+
+function cloneHistoryMapAlert(alert){
+    const title=alert.event || "Untitled";
+    return {
+        id:alert.id || [title,alert.sent,alert.expires,alert.headline].join("|"),
+        event:title
+    };
+}
+
+function getHistoryMapFrameFromSnapshot(frame){
+    const countyAlerts={};
+    const titleCounts=new Map();
+    Object.entries(frame?.alerts || {}).forEach(([fips,alerts])=>{
+        if(!isEventTitleDisplayableCounty(fips)) return;
+        if(!Array.isArray(alerts)) return;
+        const seenIds=new Set();
+        alerts.forEach(alert=>{
+            if(!alert || typeof alert !== "object") return;
+            const title=alert.event || "Untitled";
+            const id=alert.id || [title,alert.sent,alert.expires,alert.headline].join("|");
+            if(seenIds.has(id)) return;
+            seenIds.add(id);
+            if(!countyAlerts[fips]) countyAlerts[fips]=[];
+            countyAlerts[fips].push(cloneHistoryMapAlert(alert));
+            titleCounts.set(title,(titleCounts.get(title) || 0) + 1);
+        });
+    });
+    return {
+        timestamp:frame.timestamp,
+        countyAlerts,
+        titleCounts:Object.fromEntries(titleCounts)
+    };
+}
+
+function getHistoryMapTitleCountsFromFrames(frames){
+    const titleCounts=new Map();
+    frames.forEach(frame=>{
+        Object.entries(frame.titleCounts || {}).forEach(([title,count])=>{
+            titleCounts.set(title,(titleCounts.get(title) || 0) + count);
+        });
+    });
+    return titleCounts;
+}
+
+function getCachedHistoryMapFrames(sinceTimestamp=null){
+    const cutoff=Date.now() - getHistoryRetentionMs();
+    const frames=(historyMapCache.frames || []).filter(frame=>{
+        if(!frame || !Number.isFinite(frame.timestamp)) return false;
+        if(frame.timestamp < cutoff) return false;
+        if(Number.isFinite(sinceTimestamp) && frame.timestamp <= sinceTimestamp) return false;
+        return true;
+    });
+    return {
+        frames,
+        titleCounts:getHistoryMapTitleCountsFromFrames(frames)
+    };
+}
+
+async function loadPlotHistoryFramesFromDb(sinceTimestamp=null,onProgress=null,onHistoryMapProgress=null){
+    let directError=null;
+    try{
+        const frames=[];
+        const historyMapFrames=[];
+        const cutoff=Date.now() - getHistoryRetentionMs();
+        const lowerBound=Number.isFinite(sinceTimestamp)
+            ? Math.max(cutoff,sinceTimestamp + 1)
+            : cutoff;
+
+        await withHistoryStore("readonly",(store)=>{
+            let total=0;
+            let processed=0;
+            const countRequest=store.count(IDBKeyRange.lowerBound(lowerBound));
+            countRequest.onsuccess=()=>{
+                total=countRequest.result || 0;
+                if(typeof onProgress === "function") onProgress(total ? 1 : 100);
+                if(typeof onHistoryMapProgress === "function") onHistoryMapProgress(total ? 1 : 100);
+            };
+            const request=store.openCursor(IDBKeyRange.lowerBound(lowerBound));
+            request.onsuccess=()=>{
+                const cursor=request.result;
+                if(!cursor){
+                    if(typeof onProgress === "function") onProgress(100);
+                    if(typeof onHistoryMapProgress === "function") onHistoryMapProgress(100);
+                    return;
+                }
+                processed++;
+                const frame=cursor.value;
+                try{
+                    if(frame && Number.isFinite(frame.timestamp) && frame.alerts && typeof frame.alerts === "object"){
+                        if(Number.isFinite(sinceTimestamp) && frame.timestamp <= sinceTimestamp){
+                            if(typeof onProgress === "function" && total && processed % 20 === 0){
+                                onProgress((processed / total) * 100);
+                            }
+                            if(typeof onHistoryMapProgress === "function" && total && processed % 20 === 0){
+                                onHistoryMapProgress((processed / total) * 100);
+                            }
+                            cursor.continue();
+                            return;
+                        }
+                        const plotCounts=getHistoryFramePlotCounts(frame);
+                        frames.push({
+                            timestamp:frame.timestamp,
+                            alertTitleCounts:plotCounts.alertTitleCounts,
+                            countyTitleCounts:plotCounts.countyTitleCounts
+                        });
+                        historyMapFrames.push(getHistoryMapFrameFromSnapshot(frame));
+                    }
+                }catch(error){
+                    console.warn("Unable to process plot history frame",frame?.timestamp,error);
+                }
+                if(typeof onProgress === "function" && total && processed % 20 === 0){
+                    onProgress((processed / total) * 100);
+                }
+                if(typeof onHistoryMapProgress === "function" && total && processed % 20 === 0){
+                    onHistoryMapProgress((processed / total) * 100);
+                }
+                cursor.continue();
+            };
+        });
+
+        const normalizedFrames=normalizeHistoryFrames(frames);
+        const normalizedHistoryMapFrames=normalizeHistoryFrames(historyMapFrames);
+        return {
+            frames:normalizedFrames,
+            titleCounts:getPlotTitleCountsFromFrames(normalizedFrames),
+            historyMap:{
+                frames:normalizedHistoryMapFrames,
+                titleCounts:getHistoryMapTitleCountsFromFrames(normalizedHistoryMapFrames)
+            }
+        };
+    }catch(error){
+        directError=error;
+        console.warn("Unable to load plot history directly",error);
+    }
+
+    try{
+        return await loadPlotHistoryFramesFromMetadata(sinceTimestamp);
+    }catch(error){
+        console.warn("Unable to load plot history fallback",error);
+        if(directError) console.warn("Original plot history error",directError);
+        return {
+            frames:[],
+            titleCounts:new Map(),
+            historyMap:{
+                frames:[],
+                titleCounts:new Map()
+            }
+        };
+    }
+}
+
+async function loadPlotHistoryFrames(sinceTimestamp=null){
+    const cachedFrames=getCachedPlotHistoryFrames(sinceTimestamp);
+    if(plotHistoryReady || cachedFrames.frames.length){
+        return cachedFrames;
+    }
+    return loadPlotHistoryFramesFromDb(sinceTimestamp);
+}
+
+async function loadPlotHistoryFramesFromMetadata(sinceTimestamp=null){
+    const metadata=await loadHistorySnapshots(sinceTimestamp);
+    const frames=[];
+
+    for(const frameMetadata of metadata){
+        try{
+            if(Number.isFinite(sinceTimestamp) && frameMetadata.timestamp <= sinceTimestamp) continue;
+            const frame=await loadHistoryFrame(frameMetadata.timestamp);
+            if(!frame) continue;
+            const plotCounts=getHistoryFramePlotCounts(frame);
+            frames.push({
+                timestamp:frame.timestamp,
+                alertTitleCounts:plotCounts.alertTitleCounts,
+                countyTitleCounts:plotCounts.countyTitleCounts,
+                historyMapFrame:getHistoryMapFrameFromSnapshot(frame)
+            });
+        }catch(error){
+            console.warn("Unable to load plot frame from metadata",frameMetadata?.timestamp,error);
+        }
+    }
+
+    const normalizedFrames=normalizeHistoryFrames(frames);
+    return {
+        frames:normalizedFrames,
+        titleCounts:getPlotTitleCountsFromFrames(normalizedFrames),
+        historyMap:{
+            frames:normalizeHistoryFrames(frames.map(frame=>frame.historyMapFrame).filter(Boolean)),
+            titleCounts:getHistoryMapTitleCountsFromFrames(frames.map(frame=>frame.historyMapFrame).filter(Boolean))
+        }
+    };
+}
+
+function startHistoryIndexBackgroundLoad(){
+    if(historyIndexLoading) return historyIndexLoadPromise;
+    const clearGeneration=historyClearGeneration;
+    historyIndexLoading=true;
+    setStartupStatus("history","History: reading saved frames");
+    setStartupTaskProgress("history",0);
+    historyIndexLoadPromise=(async()=>{
+        const frames=await loadHistorySnapshotsFromDb(null,percent=>setStartupTaskProgress("history",percent));
+        if(clearGeneration !== historyClearGeneration) return [];
+        historyIndexCache=frames;
+        historyIndexReady=true;
+        setStartupTaskProgress("history",100);
+        setStartupStatus("history","History: " + frames.length + (frames.length === 1 ? " frame" : " frames"),"done");
+        syncOpenHistoryPanelFromCache();
+        return frames;
+    })().catch(error=>{
+        setStartupTaskProgress("history",100);
+        setStartupStatus("history","History: unavailable","error");
+        console.warn("Unable to build background history index",error);
+        return [];
+    }).finally(()=>{
+        historyIndexLoading=false;
+    });
+    return historyIndexLoadPromise;
+}
+
+function startHistoryAlertHashIndexBackgroundLoad(){
+    setStartupStatus("alertRefs","Alert refs: indexing history");
+    return getHistoryAlertHashIndex()
+        .then(index=>{
+            setStartupStatus("alertRefs","Alert refs: " + index.size + (index.size === 1 ? " hash" : " hashes"),"done");
+            return index;
+        })
+        .catch(error=>{
+            setStartupStatus("alertRefs","Alert refs: unavailable","error");
+            console.warn("Unable to build alert reference hash index",error);
+            return new Map();
+        });
+}
+
+function startPlotHistoryBackgroundLoad(){
+    if(plotHistoryLoading) return plotHistoryLoadPromise;
+    const clearGeneration=historyClearGeneration;
+    plotHistoryLoading=true;
+    setStartupStatus("plot","Plot cache: reading event counts");
+    setStartupStatus("historyMap","History map: reading alert counts");
+    setStartupTaskProgress("plot",0);
+    setStartupTaskProgress("historyMap",0);
+    plotHistoryLoadPromise=(async()=>{
+        if(!historyIndexReady){
+            await startHistoryIndexBackgroundLoad();
+        }
+        const plotHistory=await loadPlotHistoryFramesFromDb(
+            null,
+            percent=>setStartupTaskProgress("plot",percent),
+            percent=>setStartupTaskProgress("historyMap",percent)
+        );
+        if(clearGeneration !== historyClearGeneration){
+            return { frames:[], titleCounts:new Map(), historyMap:{ frames:[], titleCounts:new Map() } };
+        }
+        plotHistoryCache={
+            frames:Array.isArray(plotHistory.frames) ? plotHistory.frames : [],
+            titleCounts:plotHistory.titleCounts instanceof Map ? plotHistory.titleCounts : new Map()
+        };
+        historyMapCache={
+            frames:Array.isArray(plotHistory.historyMap?.frames) ? plotHistory.historyMap.frames : [],
+            titleCounts:plotHistory.historyMap?.titleCounts instanceof Map ? plotHistory.historyMap.titleCounts : new Map()
+        };
+        plotHistoryReady=true;
+        historyMapReady=true;
+        populateHistoryMapEventTypeOptions(historyMapCache.titleCounts);
+        setStartupTaskProgress("plot",100);
+        setStartupTaskProgress("historyMap",100);
+        setStartupStatus("plot","Plot cache: " + plotHistoryCache.frames.length + (plotHistoryCache.frames.length === 1 ? " frame" : " frames"),"done");
+        setStartupStatus("historyMap","History map: " + historyMapCache.frames.length + (historyMapCache.frames.length === 1 ? " frame" : " frames"),"done");
+        syncOpenPlotPanelFromCache();
+        return plotHistoryCache;
+    })().catch(error=>{
+        setStartupTaskProgress("plot",100);
+        setStartupTaskProgress("historyMap",100);
+        setStartupStatus("plot","Plot cache: unavailable","error");
+        setStartupStatus("historyMap","History map: unavailable","error");
+        console.warn("Unable to build background plot cache",error);
+        return plotHistoryCache;
+    }).finally(()=>{
+        plotHistoryLoading=false;
+    });
+    return plotHistoryLoadPromise;
+}
+
+function startHistoryBackgroundCaches(){
+    if(startupBackgroundCachesStarted) return;
+    startupBackgroundCachesStarted=true;
+    setStartupStatus("history","History: waiting for map");
+    setStartupStatus("alertRefs","Alert refs: waiting for history");
+    setStartupStatus("plot","Plot cache: waiting for history");
+    setStartupStatus("historyMap","History map: waiting for plot cache");
+    runWhenIdle(()=>{
+        startHistoryIndexBackgroundLoad().finally(()=>{
+            runWhenIdle(()=>{
+                startHistoryAlertHashIndexBackgroundLoad().finally(()=>{
+                    runWhenIdle(()=>startPlotHistoryBackgroundLoad(),1800);
+                });
+            },900);
+        });
+    },1800);
+}
+
+async function startHistoryBackgroundCachesAfterFirstMapPaint(){
+    await nextPaint();
+    await nextPaint();
+    startHistoryBackgroundCaches();
+}
+
+function getHistoryFramePlotCounts(frame){
+    return getAlertTitleSummary(frame?.alerts || {},{ displayableCountiesOnly:true });
+}
+
+function getHistoryFrameEventTitleCounts(frame){
+    return getHistoryFramePlotCounts(frame).alertTitleCounts;
+}
+
+function getSelectedHistoryMapEventTitles(){
+    const select=document.getElementById('historyMapEventTypes');
+    if(!select) return [];
+    return [...select.selectedOptions].map(option=>option.value);
+}
+
+function setHistoryMapStatus(message){
+    const status=document.getElementById('historyMapStatus');
+    if(status) status.textContent=message;
+    if(historyMapPanelStatus) historyMapPanelStatus.textContent=message;
+}
+
+function populateHistoryMapEventTypeOptions(titleCounts=null){
+    const select=document.getElementById('historyMapEventTypes');
+    if(!select) return;
+    if(!(titleCounts instanceof Map)){
+        titleCounts=historyMapCache.titleCounts instanceof Map
+            ? historyMapCache.titleCounts
+            : getHistoryMapTitleCountsFromFrames(historyMapCache.frames || []);
+    }
+
+    const currentSelection=new Set(getSelectedHistoryMapEventTitles());
+    const hadOptions=select.options.length;
+    const allExistingSelected=hadOptions > 0 && currentSelection.size === hadOptions;
+    const titles=[...titleCounts.keys()].sort((a,b)=>a.localeCompare(b));
+
+    select.innerHTML=titles.map(title=>{
+        const selected=currentSelection.size ? currentSelection.has(title) || allExistingSelected : false;
+        const count=titleCounts.get(title) || 0;
+        return `<option value="${escapeHtml(title)}" ${selected ? "selected" : ""}>${escapeHtml(title)} (${count})</option>`;
+    }).join("");
+}
+
+function getHistoryMapColor(count){
+    if(count <= 0) return "#f7f7f7";
+    const ratio=historyMapMaxCount ? count / historyMapMaxCount : 0;
+    if(ratio >= 0.85) return "#7f0000";
+    if(ratio >= 0.65) return "#b30000";
+    if(ratio >= 0.45) return "#e34a33";
+    if(ratio >= 0.25) return "#fc8d59";
+    if(ratio >= 0.1) return "#fdbb84";
+    return "#fee8c8";
+}
+
+function getHistoryMapFeatureStyle(f){
+    const fips=getFips(f);
+    const count=historyMapCountyCounts[fips] || 0;
+    if(!count){
+        return {fillOpacity:0.05,color:"#000",weight:0.4};
+    }
+    return {
+        fillColor:getHistoryMapColor(count),
+        fillOpacity:Math.max(0.35, countyOpacityValue),
+        color:"#000",
+        weight:0.4
+    };
+}
+
+function getHistoryMapCacheFramesInRange(){
+    const range=getHistoryMapRange();
+    return getCachedHistoryMapFrames().frames.filter(frame=>frame.timestamp >= range.start && frame.timestamp <= range.stop);
+}
+
+function getHistoryMapRange(){
+    const start=parseDateTimeLocal(historyMapStart.value);
+    const stop=parseDateTimeLocal(historyMapStop.value);
+    const lo=Number.isFinite(start) ? start : -Infinity;
+    const hi=Number.isFinite(stop) ? stop : Infinity;
+    return lo <= hi ? { start:lo, stop:hi } : { start:hi, stop:lo };
+}
+
+function getHistoryMapSelectionState(){
+    const selectedTitles=new Set(getSelectedHistoryMapEventTitles());
+    const optionCount=document.getElementById('historyMapEventTypes')?.options.length || 0;
+    return { selectedTitles, optionCount };
+}
+
+function historyMapAlertMatchesSelection(alert,selection=getHistoryMapSelectionState()){
+    const title=alert?.event || "Untitled";
+    if(selection.optionCount && !selection.selectedTitles.size) return false;
+    if(selection.selectedTitles.size && !selection.selectedTitles.has(title)) return false;
+    return true;
+}
+
+function getHistoryMapAlertId(alert){
+    const title=alert?.event || "Untitled";
+    return alert?.id || [title,alert?.sent,alert?.expires,alert?.headline].join("|");
+}
+
+function getHistoryMapSidebarCacheKey(fips,selection=getHistoryMapSelectionState()){
+    const range=getHistoryMapRange();
+    const titles=[...selection.selectedTitles].sort().join("|");
+    return [
+        fips,
+        Number.isFinite(range.start) ? range.start : "start",
+        Number.isFinite(range.stop) ? range.stop : "stop",
+        selection.optionCount,
+        titles
+    ].join("::");
+}
+
+function getHistoryMapCountyFrameCandidates(fips,selection=getHistoryMapSelectionState()){
+    const frames=getHistoryMapCacheFramesInRange();
+    const candidates=[];
+    const seenIds=new Set();
+    frames.forEach(frame=>{
+        const alerts=frame.countyAlerts?.[fips] || [];
+        if(!Array.isArray(alerts) || !alerts.length) return;
+
+        const ids=new Set();
+        alerts.forEach(alert=>{
+            if(!historyMapAlertMatchesSelection(alert,selection)) return;
+            const id=getHistoryMapAlertId(alert);
+            if(seenIds.has(id)) return;
+            seenIds.add(id);
+            ids.add(id);
+        });
+
+        if(ids.size){
+            candidates.push({ timestamp:frame.timestamp, ids });
+        }
+    });
+    return candidates;
+}
+
+function cacheHistoryMapSidebarHtml(key,html){
+    historyMapSidebarCache.set(key,html);
+    if(historyMapSidebarCache.size > HISTORY_MAP_SIDEBAR_CACHE_LIMIT){
+        historyMapSidebarCache.delete(historyMapSidebarCache.keys().next().value);
+    }
+}
+
+function suppressLiveAlertDisplayForHistoryMap(){
+    if(!historyMapSuppressedLiveState){
+        historyMapSuppressedLiveState={
+            radarEnabled:radarToggle.checked,
+            countyColorizationMode
+        };
+    }
+
+    radarToggle.checked=false;
+    if(radarLayer){
+        map.removeLayer(radarLayer);
+        radarLayer=null;
+    }
+    countyColorizationMode=0;
+}
+
+function restoreLiveAlertDisplayAfterHistoryMap(){
+    if(!historyMapSuppressedLiveState) return;
+
+    const previousState=historyMapSuppressedLiveState;
+    historyMapSuppressedLiveState=null;
+    countyColorizationMode=previousState.countyColorizationMode;
+    radarToggle.checked=previousState.radarEnabled;
+
+    if(previousState.radarEnabled && !historyModeActive){
+        reloadRadar();
+    } else if(radarLayer){
+        map.removeLayer(radarLayer);
+        radarLayer=null;
+    }
+}
+
+function updateHistoryMapBadges(){
+    if(!historyMapActive) return;
+    historyModeBadge.textContent="History Map";
+    historyTimeBadge.textContent=historyMapRangeLabel || "Alert counts";
+}
+
+function startHistoryMapBackgroundLoad(){
+    if(historyMapCacheLoading) return historyMapCacheLoadPromise;
+    historyMapCacheLoading=true;
+    historyMapCacheLoadPromise=startPlotHistoryBackgroundLoad().then(()=>{
+        historyMapReady=historyMapReady || historyMapCache.frames.length > 0;
+        populateHistoryMapEventTypeOptions(historyMapCache.titleCounts);
+        return historyMapCache;
+    }).finally(()=>{
+        historyMapCacheLoading=false;
+    });
+    return historyMapCacheLoadPromise;
+}
+
+function setHistoryMapRangeDefaultsFromCache(){
+    const frames=getCachedHistoryMapFrames().frames;
+    if(!frames.length) return;
+    if(!historyMapStart.value) historyMapStart.value=formatDateTimeLocal(frames[0].timestamp);
+    if(!historyMapStop.value) historyMapStop.value=formatDateTimeLocal(frames[frames.length - 1].timestamp);
+}
+
+function clearHistoryMapQuickRange(){
+    if(historyMapQuickRange) historyMapQuickRange.value="";
+}
+
+async function setHistoryMapQuickRange(hoursValue,options={}){
+    const { apply=true }=options;
+    const hours=Number(hoursValue);
+    if(!Number.isFinite(hours) || hours <= 0) return false;
+
+    let frames=getCachedHistoryMapFrames().frames;
+    if(!frames.length || historyMapCacheLoading){
+        setHistoryMapStatus("Reading saved history...");
+        await startHistoryMapBackgroundLoad();
+        frames=getCachedHistoryMapFrames().frames;
+    }
+    if(!frames.length){
+        setHistoryMapStatus("No saved history frames.");
+        return false;
+    }
+
+    const stop=frames[frames.length - 1].timestamp;
+    historyMapStop.value=formatDateTimeLocal(stop);
+    historyMapStart.value=formatDateTimeLocal(stop - hours * 60 * 60 * 1000);
+    if(apply) applyHistoryMapFromControls();
+    return true;
+}
+
+async function applyHistoryMapFromControls(){
+    if(historyMapLoading){
+        if(!historyMapPanel.classList.contains('open')){
+            historyMapPanel.classList.add('open');
+            historyMapPanel.classList.remove('minimized');
+            minimizedPanels.historyMap=false;
+            updatePanelRestoreDock();
+            clampHistoryMapPanel();
+        }
+        setHistoryMapStatus("Building history map...");
+        return;
+    }
+    const loadToken=++historyMapLoadToken;
+    historyMapLoading=true;
+    setHistoryMapStatus("Building history map...");
+
+    try{
+        if(!historyMapPanel.classList.contains('open')){
+            historyMapPanel.classList.add('open');
+            historyMapPanel.classList.remove('minimized');
+            minimizedPanels.historyMap=false;
+            updatePanelRestoreDock();
+            clampHistoryMapPanel();
+        }
+        document.body.classList.add('history-active');
+        suppressLiveAlertDisplayForHistoryMap();
+        historyMapActive=true;
+        historyModeActive=true;
+        historyFrameTimestamp=null;
+        disableLiveOnlyOverlays();
+        historyModeBadge.textContent="History Map";
+        historyTimeBadge.textContent="Preparing alert counts";
+        redrawMap();
+
+        if(!historyMapReady && !historyMapCache.frames.length){
+            setHistoryMapStatus("Indexing saved history in the background...");
+            startHistoryMapBackgroundLoad().then(()=>{
+                if(historyMapActive) applyHistoryMapFromControls();
+            });
+            return;
+        }
+
+        setHistoryMapRangeDefaultsFromCache();
+        populateHistoryMapEventTypeOptions(historyMapCache.titleCounts);
+        const selection=getHistoryMapSelectionState();
+        historyMapSidebarCache.clear();
+        const frames=getHistoryMapCacheFramesInRange();
+        if(!frames.length){
+            setHistoryMapStatus("No frames in the selected time frame.");
+            historyMapLoading=false;
+            return;
+        }
+
+        const countyAlertIds={};
+        const countyEvents={};
+        const countyAlerts={};
+
+        for(const frame of frames){
+            if(loadToken !== historyMapLoadToken) return;
+            Object.entries(frame.countyAlerts || {}).forEach(([fips,alerts])=>{
+                if(!Array.isArray(alerts)) return;
+                alerts.forEach(alert=>{
+                    const title=alert?.event || "Untitled";
+                    if(!historyMapAlertMatchesSelection(alert,selection)) return;
+                    const id=alert.id || [title,alert.sent,alert.expires,alert.headline].join("|");
+                    if(!countyAlertIds[fips]) countyAlertIds[fips]=new Set();
+                    if(countyAlertIds[fips].has(id)) return;
+                    countyAlertIds[fips].add(id);
+                    if(!countyEvents[fips]) countyEvents[fips]={};
+                    countyEvents[fips][title]=(countyEvents[fips][title] || 0) + 1;
+                    if(!countyAlerts[fips]) countyAlerts[fips]=[];
+                    countyAlerts[fips].push(alert);
+                });
+            });
+        }
+
+        historyMapCountyCounts={};
+        Object.entries(countyAlertIds).forEach(([fips,ids])=>{
+            historyMapCountyCounts[fips]=ids.size;
+        });
+        historyMapCountyEvents=countyEvents;
+        historyMapCountyAlerts=countyAlerts;
+        historyMapMaxCount=Math.max(0,...Object.values(historyMapCountyCounts));
+        historyMapFrameCount=frames.length;
+        historyMapActive=true;
+        historyModeActive=true;
+        historyFrameTimestamp=null;
+        historyMapRangeLabel=new Date(frames[0].timestamp).toLocaleString() + " - " + new Date(frames[frames.length - 1].timestamp).toLocaleString();
+        document.body.classList.add('history-active');
+        suppressLiveAlertDisplayForHistoryMap();
+        disableLiveOnlyOverlays();
+        updateHistoryMapBadges();
+        redrawMap();
+        refreshEventFilterListIfOpen();
+        if(currentSidebarSelection){
+            showSidebar(
+                currentSidebarSelection.fips,
+                currentSidebarSelection.name,
+                currentSidebarSelection.feature,
+                false,
+                currentSidebarSelection.focusAlertId
+            );
+        }
+
+        const typeLabel=selection.selectedTitles.size
+            ? selection.selectedTitles.size + " selected type" + (selection.selectedTitles.size === 1 ? "" : "s")
+            : selection.optionCount
+                ? "no selected types"
+                : "all types";
+        setHistoryMapStatus(historyMapMaxCount
+            ? historyMapFrameCount + " frames, " + Object.keys(historyMapCountyCounts).length + " counties, max " + historyMapMaxCount + " alerts, " + typeLabel + "."
+            : historyMapFrameCount + " frames, no matching alerts, " + typeLabel + "."
+        );
+    }catch(error){
+        console.warn("Unable to build history map",error);
+        setHistoryMapStatus("Unable to build history map.");
+    }finally{
+        if(loadToken === historyMapLoadToken) historyMapLoading=false;
+    }
+}
+
+function selectAllHistoryMapEventTypes(){
+    document.querySelectorAll('#historyMapEventTypes option').forEach(option=>option.selected=true);
+    applyHistoryMapFromControls();
+}
+
+function clearHistoryMapEventTypes(){
+    document.querySelectorAll('#historyMapEventTypes option').forEach(option=>option.selected=false);
+    applyHistoryMapFromControls();
+}
+
+async function openHistoryMapPanel(){
+    historyMapPanel.classList.remove('minimized');
+    historyMapPanel.classList.add('open');
+    minimizedPanels.historyMap=false;
+    updatePanelRestoreDock();
+    clampHistoryMapPanel();
+    suppressLiveAlertDisplayForHistoryMap();
+    redrawMap();
+    populateHistoryMapEventTypeOptions(historyMapCache.titleCounts);
+    const quickRangeValue=historyMapQuickRange?.value || "";
+    if(quickRangeValue){
+        const updated=await setHistoryMapQuickRange(quickRangeValue,{ apply:false });
+        if(updated) clearHistoryMapEventTypes();
+        return;
+    }
+    setHistoryMapRangeDefaultsFromCache();
+    clearHistoryMapEventTypes();
+}
+
+function closeHistoryMapPanel(){
+    historyMapLoadToken++;
+    historyMapLoading=false;
+    historyMapPanel.classList.remove('open','minimized');
+    minimizedPanels.historyMap=false;
+    updatePanelRestoreDock();
+    exitHistoryMapMode();
+}
+
+function minimizeHistoryMapPanel(){
+    if(!historyMapPanel.classList.contains('open')) return;
+    historyMapPanel.classList.add('minimized');
+    minimizedPanels.historyMap=true;
+    updatePanelRestoreDock();
+}
+
+function restoreHistoryMapPanel(){
+    historyMapPanel.classList.add('open');
+    historyMapPanel.classList.remove('minimized');
+    minimizedPanels.historyMap=false;
+    updatePanelRestoreDock();
+    clampHistoryMapPanel();
+}
+
+function exitHistoryMapMode(){
+    if(!historyMapActive && !historyMapSuppressedLiveState) return;
+    historyMapLoadToken++;
+    historyMapActive=false;
+    historyMapLoading=false;
+    historyMapCountyCounts={};
+    historyMapCountyEvents={};
+    historyMapCountyAlerts={};
+    historyMapSidebarCache.clear();
+    historyMapMaxCount=0;
+    historyMapFrameCount=0;
+    historyMapRangeLabel="";
+    setHistoryMapStatus("History map off.");
+    document.body.classList.remove('history-active');
+    historyModeActive=false;
+    historyFrameTimestamp=null;
+    rawData=liveRawData;
+    restoreLiveAlertDisplayAfterHistoryMap();
+    refreshEventFilterListIfOpen();
+    redrawMap();
+    if(currentSidebarSelection){
+        showSidebar(
+            currentSidebarSelection.fips,
+            currentSidebarSelection.name,
+            currentSidebarSelection.feature,
+            false,
+            currentSidebarSelection.focusAlertId
+        );
+    }
+}
+
+async function toggleHistoryMapMode(){
+    if(historyMapPanel.classList.contains('open') && historyMapPanel.classList.contains('minimized')){
+        restoreHistoryMapPanel();
+    } else if(historyMapPanel.classList.contains('open')){
+        closeHistoryMapPanel();
+    } else {
+        openHistoryMapPanel();
+    }
+}
+
+function getSelectedPlotEventTitles(){
+    return [...plotEventTitles.selectedOptions].map(option=>option.value);
+}
+
+function setPlotStatus(message){
+    plotStatus.textContent=message;
+}
+
+function clearEventPlot(message="No data"){
+    plotLastGeometry=null;
+    updatePlotCursorTooltip([]);
+    const context=eventPlotCanvas.getContext('2d');
+    context.clearRect(0,0,eventPlotCanvas.width,eventPlotCanvas.height);
+    context.fillStyle="#fff";
+    context.fillRect(0,0,eventPlotCanvas.width,eventPlotCanvas.height);
+    context.fillStyle="#555";
+    context.font="24px Arial";
+    context.textAlign="center";
+    context.textBaseline="middle";
+    context.fillText(message,eventPlotCanvas.width / 2,eventPlotCanvas.height / 2);
+}
+
+function getPlotRange(){
+    const start=parseDateTimeLocal(plotStart.value);
+    const stop=parseDateTimeLocal(plotStop.value);
+    const lo=Number.isFinite(start) ? start : -Infinity;
+    const hi=Number.isFinite(stop) ? stop : Infinity;
+    return lo <= hi ? { start:lo, stop:hi } : { start:hi, stop:lo };
+}
+
+function buildPlotSeriesByTitle(){
+    const titles=getSelectedPlotEventTitles();
+    const range=getPlotRange();
+    const mode=getPlotCountMode();
+
+    return titles.map(title=>{
+        return {
+            title,
+            points:plotFrames
+                .filter(frame=>frame.timestamp >= range.start && frame.timestamp <= range.stop)
+                .map(frame=>({
+                    timestamp:frame.timestamp,
+                    value:getPlotFrameTitleCounts(frame,mode)[title] || 0
+                }))
+        };
+    });
+}
+
+function getPlotColor(index){
+    const colors=[
+        "#1769aa",
+        "#c62828",
+        "#2e7d32",
+        "#6a1b9a",
+        "#ef6c00",
+        "#00838f",
+        "#ad1457",
+        "#5d4037"
+    ];
+    return colors[index % colors.length];
+}
+
+function truncateCanvasText(context,text,maxWidth){
+    const value=String(text);
+    if(context.measureText(value).width <= maxWidth) return value;
+    let truncated=value;
+    while(truncated.length > 1 && context.measureText(truncated + "...").width > maxWidth){
+        truncated=truncated.slice(0,-1);
+    }
+    return truncated + "...";
+}
+
+function drawPlotLegend(context,seriesByTitle,width,dpr){
+    const rowHeight=18 * dpr;
+    const swatchSize=10 * dpr;
+    const x=70 * dpr;
+    let y=14 * dpr;
+    context.font=(11 * dpr)+"px Arial";
+    context.textAlign="left";
+    context.textBaseline="middle";
+
+    seriesByTitle.slice(0,8).forEach((series,index)=>{
+        context.fillStyle=getPlotColor(index);
+        context.fillRect(x,y - swatchSize / 2,swatchSize,swatchSize);
+        context.fillStyle="#333";
+        context.fillText(
+            truncateCanvasText(context,series.title,width - x - 90 * dpr),
+            x + 16 * dpr,
+            y
+        );
+        y+=rowHeight;
+    });
+
+    if(seriesByTitle.length > 8){
+        context.fillStyle="#555";
+        context.fillText("+" + (seriesByTitle.length - 8) + " more",x,y);
+    }
+}
+
+function getVisiblePlotSeries(seriesByTitle){
+    return seriesByTitle.filter(series=>series.points.some(point=>point.value > 0));
+}
+
+function getAllPlotPoints(seriesByTitle){
+    return seriesByTitle.flatMap(series=>series.points);
+}
+
+function getPlotFrameCount(seriesByTitle){
+    return seriesByTitle[0]?.points.length || 0;
+}
+
+function getLatestPlotTotal(seriesByTitle){
+    return seriesByTitle.reduce((total,series)=>{
+        const latest=series.points[series.points.length - 1];
+        return total + (latest?.value || 0);
+    },0);
+}
+
+function getNearestPlotFrameTimestamp(timestamp,seriesByTitle){
+    const points=seriesByTitle[0]?.points || [];
+    if(!points.length) return null;
+    let best=points[0].timestamp;
+    let bestDelta=Math.abs(best - timestamp);
+    points.forEach(point=>{
+        const delta=Math.abs(point.timestamp - timestamp);
+        if(delta < bestDelta){
+            best=point.timestamp;
+            bestDelta=delta;
+        }
+    });
+    return best;
+}
+
+function getPlotCursorSummary(seriesByTitle){
+    if(!plotCursorTimestamp) return "";
+    const rows=seriesByTitle.map(series=>{
+        const point=series.points.find(candidate=>candidate.timestamp === plotCursorTimestamp);
+        return {
+            title:series.title,
+            value:point?.value || 0
+        };
+    });
+    const nonZero=rows.filter(row=>row.value > 0);
+    const shown=(nonZero.length ? nonZero : rows).slice(0,3);
+    const details=shown.map(row=>row.title + ": " + row.value).join(", ");
+    const more=rows.length > shown.length ? ", +" + (rows.length - shown.length) + " more" : "";
+    return new Date(plotCursorTimestamp).toLocaleString() + (details ? " | " + details + more : "");
+}
+
+function getPlotCursorRows(seriesByTitle){
+    if(!plotCursorTimestamp) return [];
+    return seriesByTitle.map((series,index)=>{
+        const point=series.points.find(candidate=>candidate.timestamp === plotCursorTimestamp);
+        return {
+            title:series.title,
+            value:point?.value || 0,
+            color:getPlotColor(index)
+        };
+    });
+}
+
+function updatePlotCursorTooltip(seriesByTitle){
+    if(!plotCursorTimestamp || !seriesByTitle.length || !plotLastGeometry){
+        plotCursorTooltip.classList.remove('visible');
+        plotCursorTooltip.innerHTML="";
+        return;
+    }
+
+    const rows=getPlotCursorRows(seriesByTitle);
+    const nonZero=rows.filter(row=>row.value > 0);
+    const shown=(nonZero.length ? nonZero : rows).slice(0,8);
+    const hiddenCount=rows.length - shown.length;
+
+    plotCursorTooltip.innerHTML=`
+        <div class="plot-tooltip-time">${escapeHtml(new Date(plotCursorTimestamp).toLocaleString())}</div>
+        ${shown.map(row=>`
+            <div class="plot-tooltip-row">
+                <span class="plot-tooltip-swatch" style="background:${escapeHtml(row.color)}"></span>
+                <span class="plot-tooltip-title">${escapeHtml(row.title)}</span>
+                <b>${row.value}</b>
+            </div>
+        `).join("")}
+        ${hiddenCount > 0 ? `<div class="plot-tooltip-row">+${hiddenCount} more</div>` : ""}
+    `;
+    plotCursorTooltip.classList.add('visible');
+
+    requestAnimationFrame(()=>{
+        if(!plotLastGeometry || !plotCursorTimestamp) return;
+        const canvasRect=eventPlotCanvas.getBoundingClientRect();
+        const wrapRect=eventPlotCanvas.parentElement.getBoundingClientRect();
+        const tooltipRect=plotCursorTooltip.getBoundingClientRect();
+        const cursorX=plotLastGeometry.xScale(plotCursorTimestamp) / plotLastGeometry.dpr;
+        const preferredLeft=(canvasRect.left - wrapRect.left) + cursorX + 12;
+        const preferredTop=(canvasRect.top - wrapRect.top) + 12;
+        const maxLeft=Math.max(0,wrapRect.width - tooltipRect.width - 8);
+        const left=preferredLeft > maxLeft ? Math.max(8,preferredLeft - tooltipRect.width - 24) : preferredLeft;
+
+        plotCursorTooltip.style.left=Math.min(Math.max(left,8),maxLeft)+"px";
+        plotCursorTooltip.style.top=Math.min(Math.max(preferredTop,8),Math.max(8,wrapRect.height - tooltipRect.height - 8))+"px";
+    });
+}
+
+function drawPlotCursor(context,seriesByTitle,xScale,margin,height,dpr){
+    const points=seriesByTitle[0]?.points || [];
+    if(!points.length) return;
+
+    if(!plotCursorTimestamp || !points.some(point=>point.timestamp === plotCursorTimestamp)){
+        plotCursorTimestamp=points[points.length - 1].timestamp;
+    }
+
+    const x=xScale(plotCursorTimestamp);
+    context.save();
+    context.strokeStyle="#111";
+    context.lineWidth=1.5 * dpr;
+    context.setLineDash([5 * dpr,4 * dpr]);
+    context.beginPath();
+    context.moveTo(x,margin.top);
+    context.lineTo(x,height - margin.bottom);
+    context.stroke();
+    context.setLineDash([]);
+
+    context.fillStyle="#111";
+    context.beginPath();
+    context.arc(x,height - margin.bottom,5 * dpr,0,Math.PI * 2);
+    context.fill();
+    context.restore();
+    updatePlotCursorTooltip(seriesByTitle);
+}
+
+function drawSingleTitlePlot(context,series,index,xScale,yScale,dpr){
+    context.strokeStyle=getPlotColor(index);
+    context.lineWidth=2.5 * dpr;
+    context.beginPath();
+    series.points.forEach((point,pointIndex)=>{
+        const x=xScale(point.timestamp);
+        const y=yScale(point.value);
+        if(pointIndex === 0) context.moveTo(x,y);
+        else context.lineTo(x,y);
+    });
+    context.stroke();
+
+    context.fillStyle=getPlotColor(index);
+    series.points.forEach(point=>{
+        const x=xScale(point.timestamp);
+        const y=yScale(point.value);
+        context.beginPath();
+        context.arc(x,y,3 * dpr,0,Math.PI * 2);
+        context.fill();
+    });
+}
+
+function drawPlotDayDividers(context,points,margin,height,dpr,xScale){
+    if(!points.length) return;
+
+    const minTime=points[0].timestamp;
+    const maxTime=points[points.length - 1].timestamp;
+    const nextDay=new Date(minTime);
+    nextDay.setHours(24,0,0,0);
+
+    context.save();
+    context.strokeStyle="#7f95ad";
+    context.lineWidth=1 * dpr;
+    context.setLineDash([3 * dpr,4 * dpr]);
+
+    for(let timestamp=nextDay.getTime();timestamp<maxTime;){
+        if(timestamp>minTime){
+            const x=xScale(timestamp);
+            context.beginPath();
+            context.moveTo(x,margin.top);
+            context.lineTo(x,height - margin.bottom);
+            context.stroke();
+        }
+        nextDay.setDate(nextDay.getDate() + 1);
+        timestamp=nextDay.getTime();
+    }
+
+    context.restore();
+}
+
+function drawPlotAxes(context,width,height,margin,seriesByTitle,maxValue,dpr,xScale,yScale){
+    context.strokeStyle="#ddd";
+    context.lineWidth=1 * dpr;
+    context.fillStyle="#333";
+    context.font=(11 * dpr)+"px Arial";
+    context.textAlign="right";
+    context.textBaseline="middle";
+
+    const ySteps=Math.min(5,maxValue);
+    for(let i=0;i<=ySteps;i++){
+        const value=Math.round((maxValue * i) / ySteps);
+        const y=yScale(value);
+        context.beginPath();
+        context.moveTo(margin.left,y);
+        context.lineTo(width - margin.right,y);
+        context.stroke();
+        context.fillText(String(value),margin.left - 8 * dpr,y);
+    }
+
+    drawPlotDayDividers(context,seriesByTitle[0]?.points || [],margin,height,dpr,xScale);
+
+    context.strokeStyle="#333";
+    context.beginPath();
+    context.moveTo(margin.left,margin.top);
+    context.lineTo(margin.left,height - margin.bottom);
+    context.lineTo(width - margin.right,height - margin.bottom);
+    context.stroke();
+
+    context.fillStyle="#333";
+    context.font=(11 * dpr)+"px Arial";
+    context.textAlign="center";
+    context.textBaseline="top";
+    const frameCount=getPlotFrameCount(seriesByTitle);
+    const labelCount=Math.min(4,frameCount);
+    const points=seriesByTitle[0]?.points || [];
+    for(let i=0;i<labelCount;i++){
+        const index=labelCount === 1 ? 0 : Math.round((points.length - 1) * i / (labelCount - 1));
+        const point=points[index];
+        context.fillText(new Date(point.timestamp).toLocaleString(),xScale(point.timestamp),height - margin.bottom + 10 * dpr);
+    }
+}
+
+function updatePlotSummary(seriesByTitle){
+    const selectedTitles=getSelectedPlotEventTitles();
+    const frameCount=getPlotFrameCount(seriesByTitle);
+    setPlotStatus(frameCount + " frames, latest " + getPlotCountModeLabel() + " " + getLatestPlotTotal(seriesByTitle));
+    const cursorSummary=getPlotCursorSummary(seriesByTitle);
+    plotHint.textContent=cursorSummary || (selectedTitles.length + " curve" + (selectedTitles.length === 1 ? "" : "s") + " selected");
+}
+
+function drawEventPlotLines(context,seriesByTitle,width,height,dpr){
+    const visibleSeries=getVisiblePlotSeries(seriesByTitle);
+    const points=getAllPlotPoints(seriesByTitle);
+    const margin={
+        left:58 * dpr,
+        right:18 * dpr,
+        top:(visibleSeries.length > 1 ? 34 : 20) * dpr,
+        bottom:52 * dpr
+    };
+    const plotWidth=width - margin.left - margin.right;
+    const plotHeight=height - margin.top - margin.bottom;
+    const minTime=points[0].timestamp;
+    const maxTime=points[points.length - 1].timestamp;
+    const maxValue=Math.max(1,...points.map(point=>point.value));
+    const xScale=timestamp=>margin.left + ((timestamp - minTime) / Math.max(1,maxTime - minTime)) * plotWidth;
+    const yScale=value=>margin.top + plotHeight - (value / maxValue) * plotHeight;
+    const timeFromX=x=>minTime + ((x - margin.left) / Math.max(1,plotWidth)) * Math.max(1,maxTime - minTime);
+    plotLastGeometry={ margin, width, height, dpr, xScale, timeFromX, seriesByTitle };
+
+    drawPlotAxes(context,width,height,margin,seriesByTitle,maxValue,dpr,xScale,yScale);
+
+    seriesByTitle.forEach((series,index)=>{
+        drawSingleTitlePlot(context,series,index,xScale,yScale,dpr);
+    });
+
+    drawPlotCursor(context,seriesByTitle,xScale,margin,height,dpr);
+
+    if(seriesByTitle.length > 1){
+        drawPlotLegend(context,seriesByTitle,width,dpr);
+    }
+}
+
+function drawEventPlot(){
+    if(!plotPanel.classList.contains('open')) return;
+
+    const rect=eventPlotCanvas.getBoundingClientRect();
+    const dpr=window.devicePixelRatio || 1;
+    const width=Math.max(320,Math.round(rect.width * dpr));
+    const height=Math.max(220,Math.round(rect.height * dpr));
+    if(eventPlotCanvas.width !== width || eventPlotCanvas.height !== height){
+        eventPlotCanvas.width=width;
+        eventPlotCanvas.height=height;
+    }
+
+    const context=eventPlotCanvas.getContext('2d');
+    context.clearRect(0,0,width,height);
+    context.fillStyle="#fff";
+    context.fillRect(0,0,width,height);
+
+    if(plotPanelLoading){
+        clearEventPlot("Loading history...");
+        return;
+    }
+
+    const seriesByTitle=buildPlotSeriesByTitle();
+    const frameCount=getPlotFrameCount(seriesByTitle);
+    if(!plotFrames.length){
+        clearEventPlot("No saved history");
+        return;
+    }
+    if(!getSelectedPlotEventTitles().length){
+        clearEventPlot("Select one or more event titles");
+        return;
+    }
+    if(!frameCount){
+        clearEventPlot("No frames in range");
+        return;
+    }
+
+    drawEventPlotLines(context,seriesByTitle,width,height,dpr);
+    updatePlotSummary(seriesByTitle);
+}
+
+function refreshEventPlot(){
+    drawEventPlot();
+}
+
+function handlePlotStopChange(){
+    plotStopAutoFollowLatest=false;
+    refreshEventPlot();
+}
+
+function changePlotCountMode(){
+    plotTitleCounts=getPlotTitleCountsFromFrames(plotFrames);
+    populatePlotEventTitleOptions(plotTitleCounts);
+    refreshEventPlot();
+}
+
+function populatePlotEventTitleOptions(titleCounts){
+    if(!(titleCounts instanceof Map)){
+        titleCounts=new Map();
+    }
+    const titles=[...titleCounts.keys()].sort((a,b)=>a.localeCompare(b));
+    const currentSelection=new Set(getSelectedPlotEventTitles());
+    const hadOptions=plotEventTitles.options.length;
+    const allExistingSelected=hadOptions > 0 && currentSelection.size === hadOptions;
+
+    plotEventTitles.innerHTML=titles.map(title=>{
+        const selected=currentSelection.size
+            ? currentSelection.has(title) || allExistingSelected
+            : false;
+        return `<option value="${escapeHtml(title)}" ${selected ? "selected" : ""}>${escapeHtml(title)} (${titleCounts.get(title)})</option>`;
+    }).join("");
+}
+
+function shouldAutoExtendPlotStop(previousLatestTimestamp){
+    if(!plotStop.value) return true;
+    if(plotStopAutoFollowLatest) return true;
+    return Number.isFinite(previousLatestTimestamp) && plotStop.value === formatDateTimeLocal(previousLatestTimestamp);
+}
+
+function setPlotStopToLatest(){
+    if(plotFrames.length){
+        plotStop.value=formatDateTimeLocal(plotFrames[plotFrames.length - 1].timestamp);
+        plotStopAutoFollowLatest=true;
+    }
+}
+
+function applyPlotHistory(plotHistory,shouldExtendStop){
+    plotFrames=Array.isArray(plotHistory.frames) ? plotHistory.frames : [];
+    plotTitleCounts=plotHistory.titleCounts instanceof Map
+        ? plotHistory.titleCounts
+        : getPlotTitleCountsFromFrames(plotFrames);
+    if(plotFrames.length){
+        if(!plotStart.value) plotStart.value=formatDateTimeLocal(plotFrames[0].timestamp);
+        if(shouldExtendStop) setPlotStopToLatest();
+    }
+    populatePlotEventTitleOptions(plotTitleCounts);
+    populateHistoryMapEventTypeOptions(historyMapCache.titleCounts);
+    setPlotStatus(plotFrames.length + (plotFrames.length === 1 ? " frame" : " frames"));
+}
+
+function mergeIncrementalPlotHistory(plotHistory,shouldExtendStop){
+    const incomingFrames=Array.isArray(plotHistory.frames) ? plotHistory.frames : [];
+    const previousFrameCount=plotFrames.length;
+    if(incomingFrames.length){
+        plotFrames=normalizeHistoryFrames([...plotFrames,...incomingFrames]);
+        plotTitleCounts=getPlotTitleCountsFromFrames(plotFrames);
+        if(shouldExtendStop) setPlotStopToLatest();
+        populatePlotEventTitleOptions(plotTitleCounts);
+    }
+    setPlotStatus(plotFrames.length + (plotFrames.length === 1 ? " frame" : " frames"));
+    return plotFrames.length - previousFrameCount;
+}
+
+async function reloadPlotHistory(){
+    if(plotPanelLoading) return;
+    if(!plotFrames.length){
+        await openPlotPanel();
+        return;
+    }
+    const loadToken=++plotLoadToken;
+    const previousLatestTimestamp=plotFrames[plotFrames.length - 1]?.timestamp;
+    const shouldExtendStop=shouldAutoExtendPlotStop(previousLatestTimestamp);
+
+    plotPanelLoading=true;
+    setPlotStatus("Updating...");
+    await nextPaint();
+
+    try{
+        const plotHistory=await loadPlotHistoryFramesFromDb(previousLatestTimestamp);
+        if(loadToken !== plotLoadToken) return;
+        plotPanelLoading=false;
+        const addedFrameCount=mergeIncrementalPlotHistory(plotHistory,shouldExtendStop);
+        if(addedFrameCount){
+            plotHistoryCache.frames=normalizeHistoryFrames([...plotHistoryCache.frames,...plotHistory.frames]);
+            plotHistoryCache.titleCounts=getPlotTitleCountsFromFrames(plotHistoryCache.frames);
+            if(plotHistory.historyMap?.frames?.length){
+                historyMapCache.frames=normalizeHistoryFrames([...historyMapCache.frames,...plotHistory.historyMap.frames]);
+                historyMapCache.titleCounts=getHistoryMapTitleCountsFromFrames(historyMapCache.frames);
+                historyMapReady=true;
+                populateHistoryMapEventTypeOptions(historyMapCache.titleCounts);
+            }
+            plotHistoryReady=true;
+        }
+        drawEventPlot();
+        if(!addedFrameCount){
+            plotHint.textContent="No new history frames since the plot was loaded.";
+        }
+    }catch(error){
+        if(loadToken !== plotLoadToken) return;
+        plotPanelLoading=false;
+        setPlotStatus("Error");
+        clearEventPlot("Unable to load history");
+        console.warn("Unable to reload plot history",error);
+    }
+}
+
+async function openPlotPanel(){
+    if(plotPanelLoading) return;
+    if(plotPanel.classList.contains('open') && plotPanel.classList.contains('minimized')){
+        restorePlotPanel();
+        return;
+    }
+    ++plotLoadToken;
+    plotPanel.classList.remove('minimized');
+    plotPanel.classList.add('open');
+    minimizedPanels.plot=false;
+    updatePanelRestoreDock();
+    clampPlotPanel();
+    [...plotEventTitles.options].forEach(option=>{ option.selected=false; });
+
+    const cachedPlotHistory=getCachedPlotHistoryFrames();
+    if(cachedPlotHistory.frames.length){
+        plotPanelLoading=false;
+        applyPlotHistory(cachedPlotHistory,!plotStop.value);
+        selectNoPlotEventTitles();
+        startPlotHistoryBackgroundLoad();
+        return;
+    }
+
+    if(plotHistoryLoading || historyIndexLoading){
+        plotPanelLoading=false;
+        plotFrames=[];
+        plotTitleCounts=new Map();
+        setPlotStatus("Indexing...");
+        clearEventPlot("History indexing in background...");
+        startPlotHistoryBackgroundLoad();
+        return;
+    }
+
+    plotPanelLoading=false;
+    plotFrames=[];
+    plotTitleCounts=new Map();
+    setPlotStatus("No data");
+    clearEventPlot("No saved history");
+    startPlotHistoryBackgroundLoad();
+}
+
+function closePlotPanel(){
+    plotLoadToken++;
+    plotPanelLoading=false;
+    plotPanel.classList.remove('open','minimized');
+    minimizedPanels.plot=false;
+    updatePanelRestoreDock();
+    plotCursorTooltip.classList.remove('visible');
+}
+
+function minimizePlotPanel(){
+    if(!plotPanel.classList.contains('open')) return;
+    plotPanel.classList.add('minimized');
+    minimizedPanels.plot=true;
+    updatePanelRestoreDock();
+}
+
+function restorePlotPanel(){
+    plotPanel.classList.add('open');
+    plotPanel.classList.remove('minimized');
+    minimizedPanels.plot=false;
+    updatePanelRestoreDock();
+    clampPlotPanel();
+    drawEventPlot();
+}
+
+function selectAllPlotEventTitles(){
+    [...plotEventTitles.options].forEach(option=>{ option.selected=true; });
+    refreshEventPlot();
+}
+
+function selectNoPlotEventTitles(){
+    [...plotEventTitles.options].forEach(option=>{ option.selected=false; });
+    refreshEventPlot();
+}
+
+function togglePlotPanel(){
+    if(plotPanel.classList.contains('open') && plotPanel.classList.contains('minimized')){
+        restorePlotPanel();
+    } else if(plotPanel.classList.contains('open')){
+        closePlotPanel();
+    } else {
+        openPlotPanel();
+    }
+}
+
+async function gotoPlotCursorHistoryFrame(){
+    if(!plotCursorTimestamp){
+        plotHint.textContent="Select a point on the plot first.";
+        return;
+    }
+
+    try{
+        if(!historyFrames.length || !historyPanel.classList.contains('open')){
+            await openHistoryPanel();
+        }
+
+        if(!historyFrames.length){
+            plotHint.textContent="No history frames are available.";
+            return;
+        }
+
+        stopHistoryPlayback();
+        const index=findNearestHistoryIndex(plotCursorTimestamp);
+        await showHistoryFrame(index);
+        plotHint.textContent="History frame: " + new Date(historyFrames[index].timestamp).toLocaleString();
+    }catch(error){
+        console.warn("Unable to go to plot cursor history frame",error);
+        plotHint.textContent="Unable to go to history frame.";
+    }
+}
+
+function updateHistoryClearProgress(percent,message,visible=true){
+    const progress=document.getElementById('historyClearProgress');
+    const bar=document.getElementById('historyClearProgressBar');
+    const text=document.getElementById('historyClearProgressText');
+    if(!progress || !bar || !text) return;
+
+    progress.classList.toggle('visible',visible);
+    bar.style.width=Math.min(Math.max(Math.round(percent),0),100) + "%";
+    text.textContent=message;
+}
+
+async function clearHistorySnapshots(){
+    stopHistoryPlayback();
+    const clearButton=document.getElementById('clearHistoryButton');
+    try{
+        historyClearGeneration++;
+        if(clearButton) clearButton.disabled=true;
+        updateHistoryClearProgress(5,"Starting clear...");
+        document.getElementById('historyStatus').textContent="Clearing...";
+        historyTime.textContent="Clearing saved history...";
+        await nextPaint();
+        await withHistoryStores([HISTORY_STORE_NAME,RADAR_TILE_STORE_NAME,HISTORY_ALERT_HASH_STORE_NAME],"readwrite",(stores)=>{
+            stores[HISTORY_STORE_NAME].clear();
+            stores[RADAR_TILE_STORE_NAME].clear();
+            stores[HISTORY_ALERT_HASH_STORE_NAME].clear();
+        });
+        updateHistoryClearProgress(45,"Saved history deleted");
+        await nextPaint();
+        historyFrames=[];
+        historyFrameCache.clear();
+        historyAlertHashIndex=null;
+        historyAlertHashIndexLoadPromise=null;
+        historyIndexCache=[];
+        historyIndexReady=true;
+        historyIndexLoading=false;
+        historyIndexLoadPromise=null;
+        plotHistoryCache={ frames:[], titleCounts:new Map() };
+        plotHistoryReady=true;
+        plotHistoryLoading=false;
+        plotHistoryLoadPromise=null;
+        historyMapCache={ frames:[], titleCounts:new Map() };
+        historyMapReady=true;
+        historyMapCacheLoading=false;
+        historyMapCacheLoadPromise=null;
+        historyFrameLoadToken++;
+        historyFrameTimestamp=null;
+        restoreLiveAlertDisplayAfterHistoryMap();
+        historyMapLoadToken++;
+        historyMapActive=false;
+        historyMapLoading=false;
+        historyMapCountyCounts={};
+        historyMapCountyEvents={};
+        historyMapCountyAlerts={};
+        historyMapSidebarCache.clear();
+        historyMapMaxCount=0;
+        historyMapFrameCount=0;
+        historyMapRangeLabel="";
+        historyStart.value="";
+        historyStop.value="";
+        updateHistoryClearProgress(75,"Memory caches reset");
+        await nextPaint();
+        updateHistoryPanelState();
+        populateHistoryMapEventTypeOptions(new Map());
+        setStartupTaskProgress("history",100);
+        setStartupStatus("history","History: 0 frames","done");
+        setStartupStatus("alertRefs","Alert refs: 0 hashes","done");
+        setStartupTaskProgress("plot",100);
+        setStartupStatus("plot","Plot cache: 0 frames","done");
+        setStartupTaskProgress("historyMap",100);
+        setStartupStatus("historyMap","History map: 0 frames","done");
+        setHistoryMapStatus("History cleared.");
+        if(historyModeActive){
+            rawData=liveRawData;
+            refreshEventFilterListIfOpen();
+            reloadRadar();
+            redrawMap();
+        }
+        updateHistoryClearProgress(100,"History cleared");
+        setTimeout(()=>updateHistoryClearProgress(0,"Ready",false),1200);
+    }catch(error){
+        updateHistoryClearProgress(100,"Unable to clear history");
+        console.warn("Unable to clear history snapshots",error);
+    }finally{
+        if(clearButton) clearButton.disabled=false;
+    }
+}
+
+function getHistoryFrameRange(){
+    const start=parseDateTimeLocal(historyStart.value);
+    const stop=parseDateTimeLocal(historyStop.value);
+    const lo=Number.isFinite(start) ? start : -Infinity;
+    const hi=Number.isFinite(stop) ? stop : Infinity;
+    return lo <= hi ? { start:lo, stop:hi } : { start:hi, stop:lo };
+}
+
+function findNearestHistoryIndex(timestamp,preferEnd=false){
+    if(!historyFrames.length) return 0;
+    let best=preferEnd ? historyFrames.length - 1 : 0;
+    let bestDelta=Infinity;
+    historyFrames.forEach((frame,index)=>{
+        const delta=Math.abs(frame.timestamp - timestamp);
+        if(delta < bestDelta){
+            best=index;
+            bestDelta=delta;
+        }
+    });
+    return best;
+}
+
+function getBoundedHistoryIndex(direction){
+    if(!historyFrames.length) return 0;
+    const range=getHistoryFrameRange();
+    const sliderIndex=Number(historySlider.value) || 0;
+    let index=sliderIndex;
+
+    if(historyFrames[index]?.timestamp < range.start){
+        index=findNearestHistoryIndex(range.start);
+    }
+    if(historyFrames[index]?.timestamp > range.stop){
+        index=findNearestHistoryIndex(range.stop,true);
+    }
+
+    while(historyFrames[index] && (historyFrames[index].timestamp < range.start || historyFrames[index].timestamp > range.stop)){
+        index+=direction;
+        if(index < 0 || index >= historyFrames.length) break;
+    }
+    return Math.min(Math.max(index,0),historyFrames.length - 1);
+}
+
+function updateHistoryPanelState(){
+    const slider=document.getElementById('historySlider');
+    const status=document.getElementById('historyStatus');
+    slider.max=Math.max(0,historyFrames.length - 1);
+    status.textContent=historyPanelLoading ? "Loading..." : historyFrames.length + (historyFrames.length === 1 ? " frame" : " frames");
+
+    if(!historyFrames.length){
+        slider.value=0;
+        historyTimeBadge.textContent="No history loaded";
+        historyTime.textContent=historyPanelLoading ? "Loading history..." : "No history loaded";
+        return;
+    }
+
+    const first=historyFrames[0].timestamp;
+    const last=historyFrames[historyFrames.length - 1].timestamp;
+    if(!historyStart.value) historyStart.value=formatDateTimeLocal(first);
+    if(!historyStop.value) historyStop.value=formatDateTimeLocal(last);
+}
+
+function applyHistoryRadar(frame){
+    try{
+        if(radarLayer) map.removeLayer(radarLayer);
+        radarLayer=null;
+        if(!radarToggle.checked || !frame?.radar?.enabled) return;
+
+        radarLayer=createHistoryRadarLayer(frame.radar.wmsTime || formatWmsTime(frame.radar.timestamp || frame.timestamp));
+        radarLayer.setOpacity(frame.radar.opacity ?? Number(radarOpacity.value) / 100);
+        radarLayer.addTo(map);
+        radarLayer.bringToFront();
+    }catch(error){
+        console.warn("Unable to apply history radar",error);
+        radarLayer=null;
+    }
+}
+
+function getCurrentHistoryFrameMetadata(){
+    if(!historyFrames.length) return null;
+    return historyFrames[Number(historySlider.value) || 0] || null;
+}
+
+function getHistoryFramesPerStep(){
+    return Math.min(Math.max(Number(historyFramesPerStep.value) || 1,1),1440);
+}
+
+function getHistoryStepsPerMinute(){
+    return Math.min(Math.max(Number(historyStepsPerMinute.value) || 60,1),600);
+}
+
+function isHistoryPlaybackRunning(){
+    return historyPlaybackActive;
+}
+
+function refreshEventFilterListIfOpen(){
+    if(document.getElementById('eventFilterOverlay').classList.contains('open')){
+        renderEventFilterList();
+        refreshEventCountyPanelIfOpen();
+        refreshEventAlertPanelIfOpen();
+    }
+}
+
+async function showHistoryFrame(index,options={}){
+    if(!historyFrames.length) return;
+    try{
+        const { stopPlayback=true, updateRadar=true }=options;
+        if(stopPlayback) stopHistoryPlayback(false,false);
+        disableLiveOnlyOverlays();
+
+        index=Math.min(Math.max(index,0),historyFrames.length - 1);
+        const metadata=historyFrames[index];
+        if(!metadata) return;
+        const loadToken=++historyFrameLoadToken;
+
+        historySlider.value=index;
+        historyModeBadge.textContent="History";
+        historyTimeBadge.textContent=new Date(metadata.timestamp).toLocaleString();
+        historyTime.textContent=(metadata.alertCount ?? 0) + " alerts in the U.S. archive";
+
+        const frame=await loadHistoryFrame(metadata.timestamp);
+        if(loadToken !== historyFrameLoadToken || !frame || !frame.alerts) return;
+
+        if(historyMapActive){
+            historyMapActive=false;
+            historyMapLoading=false;
+            historyMapCountyCounts={};
+            historyMapCountyEvents={};
+            historyMapCountyAlerts={};
+            historyMapSidebarCache.clear();
+            historyMapMaxCount=0;
+            historyMapFrameCount=0;
+            historyMapRangeLabel="";
+            setHistoryMapStatus("History map off.");
+            restoreLiveAlertDisplayAfterHistoryMap();
+        }
+        historyModeActive=true;
+        historyFrameTimestamp=frame.timestamp;
+        rawData=cloneJson(frame.alerts || {});
+        if(updateRadar) applyHistoryRadar(frame);
+        if(!isHistoryPlaybackRunning()) refreshEventFilterListIfOpen();
+        redrawMap();
+        if(currentSidebarSelection){
+            showSidebar(
+                currentSidebarSelection.fips,
+                currentSidebarSelection.name,
+                currentSidebarSelection.feature,
+                false,
+                currentSidebarSelection.focusAlertId
+            );
+        }
+    }catch(error){
+        console.warn("Unable to show history frame",error);
+    }
+}
+
+async function moveHistoryBy(frameDelta,options={}){
+    if(!historyFrames.length) return;
+    const { updateRadar=true, stopPlayback=true }=options;
+    if(stopPlayback) stopHistoryPlayback(false,false);
+
+    const range=getHistoryFrameRange();
+    const currentIndex=Number(historySlider.value) || 0;
+    let next=currentIndex + frameDelta;
+
+    if(next < 0 || next >= historyFrames.length){
+        const direction=frameDelta >= 0 ? 1 : -1;
+        next=direction > 0 ? findNearestHistoryIndex(range.stop,true) : findNearestHistoryIndex(range.start);
+    } else {
+        const nextFrame=historyFrames[next];
+        if(nextFrame.timestamp < range.start){
+            next=findNearestHistoryIndex(range.start);
+        } else if(nextFrame.timestamp > range.stop){
+            next=findNearestHistoryIndex(range.stop,true);
+        }
+    }
+
+    await showHistoryFrame(next,{ stopPlayback:false, updateRadar });
+}
+
+function getTornadoWarningCountySet(frame){
+    if(frame?.tornadoWarningCounties){
+        return new Set(frame.tornadoWarningCounties);
+    }
+
+    const counties=new Set();
+    Object.entries(frame?.alerts || {}).forEach(([fips,alerts])=>{
+        if(alerts.some(alert=>getPriorityCategory(alert.event) === "tornado-warning")){
+            counties.add(fips);
+        }
+    });
+    return counties;
+}
+
+function hasNewTornadoWarningCounty(candidateCounties,currentCounties){
+    for(const fips of candidateCounties){
+        if(!currentCounties.has(fips)) return true;
+    }
+    return false;
+}
+
+async function searchNextTornadoWarningFrame(){
+    if(!historyFrames.length) return;
+    stopHistoryPlayback(false,false);
+
+    const range=getHistoryFrameRange();
+    const currentIndex=Number(historySlider.value) || 0;
+    const currentFrame=historyFrames[currentIndex];
+    const currentCounties=getTornadoWarningCountySet(currentFrame);
+    const needsNewCounty=currentCounties.size > 0;
+    let startIndex=currentIndex + 1;
+
+    if(currentFrame?.timestamp < range.start){
+        startIndex=findNearestHistoryIndex(range.start);
+    }
+
+    for(let index=startIndex;index<historyFrames.length;index++){
+        const frame=historyFrames[index];
+        if(frame.timestamp < range.start) continue;
+        if(frame.timestamp > range.stop) break;
+
+        const candidateCounties=getTornadoWarningCountySet(frame);
+        if(!candidateCounties.size) continue;
+        if(needsNewCounty && !hasNewTornadoWarningCounty(candidateCounties,currentCounties)) continue;
+
+        await showHistoryFrame(index);
+        return;
+    }
+}
+
+function scheduleHistoryPlayback(playbackToken=historyPlaybackToken){
+    const stepsPerMinute=getHistoryStepsPerMinute();
+    historyPlaybackTimer=setTimeout(()=>{
+        historyPlaybackTimer=null;
+        if(playbackToken !== historyPlaybackToken) return;
+        stepHistoryPlayback(playbackToken).catch(error=>{
+            console.warn("Unable to step history playback",error);
+            stopHistoryPlayback();
+        });
+    },60000 / stepsPerMinute);
+}
+
+async function stepHistoryPlayback(playbackToken=historyPlaybackToken){
+    if(playbackToken !== historyPlaybackToken) return;
+    if(!historyFrames.length) return;
+
+    const range=getHistoryFrameRange();
+    const framesPerStep=getHistoryFramesPerStep();
+    let next=(Number(historySlider.value) || 0) + (historyPlaybackDirection * framesPerStep);
+    if(next < 0 || next >= historyFrames.length){
+        stopHistoryPlayback();
+        return;
+    }
+
+    const nextFrame=historyFrames[next];
+    if(!nextFrame || nextFrame.timestamp < range.start || nextFrame.timestamp > range.stop){
+        stopHistoryPlayback();
+        return;
+    }
+
+    await showHistoryFrame(next,{ stopPlayback:false, updateRadar:false });
+    if(playbackToken !== historyPlaybackToken) return;
+    scheduleHistoryPlayback(playbackToken);
+}
+
+async function playHistory(direction=1){
+    if(!historyFrames.length) return;
+    stopHistoryPlayback(false,false);
+    historyPlaybackDirection=direction;
+    historyPlaybackActive=true;
+    const playbackToken=++historyPlaybackToken;
+
+    const startIndex=getBoundedHistoryIndex(direction);
+    await showHistoryFrame(startIndex,{ stopPlayback:false, updateRadar:false });
+    if(playbackToken !== historyPlaybackToken) return;
+    if(radarLayer) map.removeLayer(radarLayer);
+    radarLayer=null;
+
+    scheduleHistoryPlayback(playbackToken);
+}
+
+function stopHistoryPlayback(resetDirection=true,updateRadarOnStop=true){
+    const wasPlaying=historyPlaybackActive;
+    historyPlaybackActive=false;
+    historyPlaybackToken++;
+    if(historyPlaybackTimer){
+        clearTimeout(historyPlaybackTimer);
+        historyPlaybackTimer=null;
+    }
+    if(resetDirection) historyPlaybackDirection=1;
+    if(wasPlaying && updateRadarOnStop && historyFrames.length){
+        const metadata=getCurrentHistoryFrameMetadata();
+        if(metadata) applyHistoryRadar(metadata);
+        redrawMap();
+        refreshEventFilterListIfOpen();
+    }
+}
+
+async function rewindHistory(){
+    stopHistoryPlayback();
+    if(!historyFrames.length) return;
+    await showHistoryFrame(findNearestHistoryIndex(getHistoryFrameRange().start));
+}
+
+async function fastForwardHistory(){
+    stopHistoryPlayback();
+    if(!historyFrames.length) return;
+    await showHistoryFrame(findNearestHistoryIndex(getHistoryFrameRange().stop,true));
+}
+
+function syncHistoryRangeInputs(){
+    if(!historyFrames.length) return;
+    const index=getBoundedHistoryIndex(historyPlaybackDirection);
+    historySlider.value=index;
+}
+
+function shouldAutoExtendHistoryStop(previousLatestTimestamp){
+    if(!historyStop.value) return true;
+    return Number.isFinite(previousLatestTimestamp) && historyStop.value === formatDateTimeLocal(previousLatestTimestamp);
+}
+
+async function reloadHistoryPanel(){
+    if(historyPanelLoading) return;
+    if(!historyFrames.length){
+        await openHistoryPanel();
+        return;
+    }
+
+    const loadToken=++historyLoadToken;
+    const previousFrameCount=historyFrames.length;
+    const previousLatestTimestamp=historyFrames[historyFrames.length - 1]?.timestamp;
+    const shouldExtendStop=shouldAutoExtendHistoryStop(previousLatestTimestamp);
+    const wasAtLatest=(Number(historySlider.value) || 0) === historyFrames.length - 1;
+
+    stopHistoryPlayback();
+    historyPanelLoading=true;
+    updateHistoryPanelState();
+    document.getElementById('historyStatus').textContent="Updating...";
+    await nextPaint();
+
+    try{
+        const loadedFrames=await loadHistorySnapshotsFromDb(previousLatestTimestamp);
+        if(loadToken !== historyLoadToken) return;
+
+        historyFrames=normalizeHistoryFrames([...historyFrames,...loadedFrames]);
+        if(loadedFrames.length){
+            mergeHistoryIndexFrames(loadedFrames);
+            historyIndexReady=true;
+        }
+        historyPanelLoading=false;
+        if(shouldExtendStop && historyFrames.length){
+            historyStop.value=formatDateTimeLocal(historyFrames[historyFrames.length - 1].timestamp);
+        }
+        updateHistoryPanelState();
+
+        const addedFrameCount=historyFrames.length - previousFrameCount;
+        if(addedFrameCount && wasAtLatest){
+            await showHistoryFrame(historyFrames.length - 1);
+        } else if(!addedFrameCount){
+            document.getElementById('historyStatus').textContent=historyFrames.length + (historyFrames.length === 1 ? " frame" : " frames") + ", no new";
+        }
+    }catch(error){
+        if(loadToken !== historyLoadToken) return;
+        historyPanelLoading=false;
+        updateHistoryPanelState();
+        console.warn("Unable to update history panel",error);
+    }
+}
+
+async function openHistoryPanel(){
+    if(historyPanelLoading) return;
+    if(historyPanel.classList.contains('open') && historyPanel.classList.contains('minimized')){
+        restoreHistoryPanel();
+        return;
+    }
+    ++historyLoadToken;
+    stopHistoryPlayback();
+    disableLiveOnlyOverlays();
+    historyModeActive=true;
+    document.body.classList.add('history-active');
+    historyPanel.classList.remove('minimized');
+    historyPanel.classList.add('open');
+    minimizedPanels.history=false;
+    updatePanelRestoreDock();
+    clampHistoryPanel();
+    populateHistoryMapEventTypeOptions();
+
+    const cachedFrames=getCachedHistorySnapshots();
+    if(cachedFrames.length){
+        historyFrames=cachedFrames;
+        historyPanelLoading=false;
+        updateHistoryPanelState();
+        if(historyFrames.length){
+            await showHistoryFrame(historyFrames.length - 1);
+        }
+        startHistoryIndexBackgroundLoad();
+        return;
+    }
+
+    historyFrames=[];
+    historyStart.value="";
+    historyStop.value="";
+    if(historyIndexLoading){
+        historyPanelLoading=false;
+        updateHistoryPanelState();
+        document.getElementById('historyStatus').textContent="Indexing...";
+        historyTime.textContent="History indexing in background...";
+        startHistoryIndexBackgroundLoad();
+        return;
+    }
+
+    historyPanelLoading=false;
+    updateHistoryPanelState();
+    startHistoryIndexBackgroundLoad();
+}
+
+function closeHistoryPanel(){
+    historyLoadToken++;
+    historyFrameLoadToken++;
+    historyPanelLoading=false;
+    stopHistoryPlayback();
+    historyPanel.classList.remove('open','minimized');
+    minimizedPanels.history=false;
+    updatePanelRestoreDock();
+    historyModeActive=false;
+    historyFrameTimestamp=null;
+    if(!historyMapActive){
+        document.body.classList.remove('history-active');
+        rawData=liveRawData;
+        refreshEventFilterListIfOpen();
+    }
+    reloadRadar();
+    redrawMap();
+    if(currentSidebarSelection){
+        showSidebar(
+            currentSidebarSelection.fips,
+            currentSidebarSelection.name,
+            currentSidebarSelection.feature,
+            false,
+            currentSidebarSelection.focusAlertId
+        );
+    }
+}
+
+function minimizeHistoryPanel(){
+    if(!historyPanel.classList.contains('open')) return;
+    historyPanel.classList.add('minimized');
+    minimizedPanels.history=true;
+    updatePanelRestoreDock();
+}
+
+function restoreHistoryPanel(){
+    if(!historyPanel.classList.contains('open')){
+        openHistoryPanel();
+        return;
+    }
+    historyPanel.classList.remove('minimized');
+    minimizedPanels.history=false;
+    updatePanelRestoreDock();
+    clampHistoryPanel();
+}
+
+// ===== SEARCH =====
+function evaluateSearch(query,text){
+    if(!query) return true;
+
+    const tokens=query.replace(/\(/g," ( ").replace(/\)/g," ) ")
+        .toLowerCase().split(/\s+/).filter(t=>t.length);
+
+    let i=0;
+
+    function expr(){
+        let v=term();
+        while(tokens[i]==="|"){ i++; v=v||term(); }
+        return v;
+    }
+
+    function term(){
+        let v=factor();
+        while(tokens[i]==="&"){ i++; v=v&&factor(); }
+        return v;
+    }
+
+    function factor(){
+        let t=tokens[i];
+        if(t==="!"){ i++; return !factor(); }
+        if(t==="("){ i++; let v=expr(); i++; return v; }
+        i++; return text.includes(t);
+    }
+
+    try{return expr();}catch{return false;}
+}
+
+function buildText(a){
+    let p=[];
+    if(filters.fields.includes("event")) p.push(a.event);
+    if(filters.fields.includes("headline")) p.push(a.headline);
+    if(filters.fields.includes("description")) p.push(a.description);
+    if(filters.fields.includes("areaDesc")) p.push(a.areaDesc);
+    if(filters.fields.includes("id")) p.push(hashAlertId(a.id));
+    return p.join(" ").toLowerCase();
+}
+
+function getFiltered(fips){
+    return (rawData[fips]||[]).filter(a=>{
+        if(filters.severity && a.severity!==filters.severity) return false;
+        if(filters.expiredOnly && !isExpired(a)) return false;
+        if(filters.eventTitleMode === "selected" && !filters.eventTitles.includes(a.event)) return false;
+        if(filters.search && !evaluateSearch(filters.search,buildText(a))) return false;
+        return true;
+    });
+}
+
+function getEventTitleCounts(){
+    const summary=getAlertTitleSummary(rawData,{ displayableCountiesOnly:true });
+    return Object.keys(summary.alertTitleCounts)
+        .map(title=>[
+            title,
+            {
+                countyCount:summary.countyTitleCounts[title] || 0,
+                alertCount:summary.alertTitleCounts[title] || 0
+            }
+        ])
+        .filter(([,count])=>count.countyCount)
+        .sort((a,b)=>a[0].localeCompare(b[0]));
+}
+
+function renderEventFilterList(){
+    const list=document.getElementById('eventFilterList');
+    const rows=getEventTitleCounts();
+
+    if(!rows.length){
+        list.innerHTML='<div class="alert">No event titles found</div>';
+        return;
+    }
+
+    list.innerHTML=rows.map(([title,count])=>{
+        const checked=filters.eventTitleMode === "all" || filters.eventTitles.includes(title);
+        return `
+        <label>
+            <span class="event-row-main">
+                <button class="event-cycle" type="button" data-title="${escapeHtml(title)}" data-direction="-1" aria-label="Previous county for ${escapeHtml(title)}" title="Previous county">&#9664;</button>
+                <span class="event-title">
+                    <input type="checkbox" value="${escapeHtml(title)}" ${checked ? "checked" : ""} onchange="updateEventTitleFilter()">
+                    <span>${escapeHtml(title)}</span>
+                </span>
+            </span>
+            <span class="event-row-tools">
+                <span class="event-count" title="Included counties / associated alerts">${count.countyCount}c/${count.alertCount}a</span>
+                <button class="event-counties" type="button" data-title="${escapeHtml(title)}" aria-label="Show included counties for ${escapeHtml(title)}" title="Included counties">#</button>
+                <button class="event-alerts" type="button" data-title="${escapeHtml(title)}" aria-label="Show active alert hashes for ${escapeHtml(title)}" title="Active alert hashes">ID</button>
+                <button class="event-cycle" type="button" data-title="${escapeHtml(title)}" data-direction="1" aria-label="Next county for ${escapeHtml(title)}" title="Next county">&#9654;</button>
+            </span>
+        </label>`;
+    }).join("");
+
+    list.querySelectorAll('.event-cycle').forEach(button=>{
+        button.addEventListener('click',()=>{
+            cycleEventTitleCounty(button.dataset.title, Number(button.dataset.direction));
+        });
+    });
+    list.querySelectorAll('.event-counties').forEach(button=>{
+        button.addEventListener('click',()=>{
+            openEventCountyPanel(button.dataset.title);
+        });
+    });
+    list.querySelectorAll('.event-alerts').forEach(button=>{
+        button.addEventListener('click',()=>{
+            openEventAlertPanel(button.dataset.title);
+        });
+    });
+}
+
+function escapeHtml(value){
+    return String(value)
+        .replace(/&/g,"&amp;")
+        .replace(/</g,"&lt;")
+        .replace(/>/g,"&gt;")
+        .replace(/"/g,"&quot;")
+        .replace(/'/g,"&#39;");
+}
+
+function compareSameCode(a,b){
+    return a.sameCode.localeCompare(b.sameCode);
+}
+
+function getAlertExpirationTime(alert){
+    const timestamp=new Date(alert?.expires || alert?.ends || 0).getTime();
+    return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function getAlertIssuedTime(alert){
+    const timestamp=new Date(alert?.sent || alert?.effective || alert?.onset || 0).getTime();
+    return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function formatCountyExpirationTime(timestamp){
+    if(!Number.isFinite(timestamp)) return "N/A";
+    return new Date(timestamp).toLocaleString([],{
+        month:"numeric",
+        day:"numeric",
+        hour:"numeric",
+        minute:"2-digit"
+    });
+}
+
+function updateEventTitleFilter(){
+    const boxes=[...document.querySelectorAll('#eventFilterList input[type="checkbox"]')];
+    const checked=boxes.filter(box=>box.checked).map(box=>box.value);
+    filters.eventTitleMode=checked.length===boxes.length ? "all" : "selected";
+    filters.eventTitles=filters.eventTitleMode === "all" ? [] : checked;
+    redrawMap();
+}
+
+function selectAllEventTitles(){
+    document.querySelectorAll('#eventFilterList input[type="checkbox"]').forEach(box=>box.checked=true);
+    updateEventTitleFilter();
+}
+
+function selectNoEventTitles(){
+    document.querySelectorAll('#eventFilterList input[type="checkbox"]').forEach(box=>box.checked=false);
+    updateEventTitleFilter();
+}
+
+function clearEventTitles(){
+    const snapshot=new Set(eventTitleFilterSnapshot.titles);
+    document.querySelectorAll('#eventFilterList input[type="checkbox"]').forEach(box=>{
+        box.checked=eventTitleFilterSnapshot.mode === "all" || snapshot.has(box.value);
+    });
+    updateEventTitleFilter();
+}
+
+function openEventFilterPopup(){
+    eventTitleFilterSnapshot={
+        mode:filters.eventTitleMode,
+        titles:[...filters.eventTitles]
+    };
+    renderEventFilterList();
+    const overlay=document.getElementById('eventFilterOverlay');
+    overlay.classList.remove('minimized');
+    overlay.classList.add('open');
+    minimizedPanels.eventFilter=false;
+    updatePanelRestoreDock();
+}
+
+function closeEventFilterPopup(){
+    const overlay=document.getElementById('eventFilterOverlay');
+    overlay.classList.remove('open','minimized');
+    closeAllEventDetailPanels();
+    minimizedPanels.eventFilter=false;
+    updatePanelRestoreDock();
+    focusedEventTitle="";
+    focusedEventCountyFips="";
+    clearFocusedEventCountyHighlight();
+}
+
+function minimizeEventFilterPopup(){
+    const overlay=document.getElementById('eventFilterOverlay');
+    if(!overlay.classList.contains('open')) return;
+    overlay.classList.add('minimized');
+    minimizedPanels.eventFilter=true;
+    updatePanelRestoreDock();
+}
+
+function restoreEventFilterPopup(){
+    const overlay=document.getElementById('eventFilterOverlay');
+    overlay.classList.add('open');
+    overlay.classList.remove('minimized');
+    minimizedPanels.eventFilter=false;
+    updatePanelRestoreDock();
+    clampEventFilterDialog();
+}
+
+function getEventTitleCountyDetails(title){
+    return Object.entries(rawData)
+        .map(([fips,alerts])=>{
+            const matches=(alerts || []).filter(a=>(a.event || "Untitled") === title);
+            if(!matches.length) return null;
+            const feature=countyFeatureByFips[fips];
+            if(!isEventTitleDisplayableCounty(fips) || !feature) return null;
+            const stateFips=String(feature.properties.STATE).padStart(2,'0');
+            return {
+                fips,
+                sameCode:String(fips).padStart(5,'0'),
+                feature,
+                name:feature.properties.NAME || fips,
+                state:stateAbbreviations[stateFips] || stateFips,
+                count:matches.length,
+                expiresAt:Math.max(...matches.map(getAlertExpirationTime).filter(Number.isFinite))
+            };
+        })
+        .filter(Boolean)
+        .sort(compareSameCode);
+}
+
+function getEventTitleAlertDetails(title){
+    const byId=new Map();
+    Object.entries(rawData).forEach(([fips,alerts])=>{
+        (alerts || []).forEach(alert=>{
+            if((alert.event || "Untitled") !== title) return;
+            const id=getAlertCountId(alert);
+            if(!byId.has(id)){
+                const feature=countyFeatureByFips[fips];
+                byId.set(id,{
+                    id,
+                    hash:hashAlertId(alert.id || id),
+                    alert,
+                    fips,
+                    feature,
+                    headline:alert.headline || alert.description || title,
+                    expiresAt:getAlertExpirationTime(alert)
+                });
+            }
+        });
+    });
+    return [...byId.values()].sort((a,b)=>
+        a.hash.localeCompare(b.hash) ||
+        (a.headline || "").localeCompare(b.headline || "")
+    );
+}
+
+function countyHasAlertId(fips,alertId){
+    if(!alertId) return false;
+    return (rawData[fips] || []).some(alert=>getAlertCountId(alert) === alertId);
+}
+
+function getCountyEventAlertIds(title,fips){
+    const ids=new Set();
+    (rawData[fips] || []).forEach(alert=>{
+        if((alert.event || "Untitled") === title){
+            ids.add(getAlertCountId(alert));
+        }
+    });
+    return ids;
+}
+
+function getMostRecentlyIssuedCountyEventAlert(title,fips){
+    return (rawData[fips] || [])
+        .filter(alert=>(alert.event || "Untitled") === title)
+        .sort((a,b)=>{
+            const issuedDelta=(getAlertIssuedTime(b) || 0) - (getAlertIssuedTime(a) || 0);
+            if(issuedDelta) return issuedDelta;
+            return (getAlertExpirationTime(b) || 0) - (getAlertExpirationTime(a) || 0);
+        })[0] || null;
+}
+
+function openEventCountyPanel(title){
+    let panel=eventCountyPanels.get(title);
+    if(!panel){
+        panel=createEventDetailPanel('county',title);
+        eventCountyPanels.set(title,panel);
+    }
+    renderEventCountyPanelContent(panel,title);
+    bringEventDetailPanelToFront(panel);
+}
+
+function refreshEventCountyPanelIfOpen(){
+    eventCountyPanels.forEach((panel,title)=>renderEventCountyPanelContent(panel,title));
+}
+
+function refreshEventAlertPanelIfOpen(){
+    eventAlertPanels.forEach((panel,title)=>renderEventAlertPanelContent(panel,title));
+}
+
+function createEventDetailPanel(type,title){
+    const panel=document.createElement('div');
+    panel.className=`event-detail-panel event-${type}-panel`;
+    panel.dataset.title=title;
+    panel.dataset.type=type;
+    panel.setAttribute('role','dialog');
+    panel.setAttribute('aria-modal','false');
+    panel.innerHTML=`
+        <div class="event-detail-header">
+            <h3></h3>
+            <button class="event-detail-close" type="button" aria-label="Close ${type} list" title="Close">&times;</button>
+        </div>
+        <div class="event-detail-body"></div>`;
+    panel.querySelector('.event-detail-close').addEventListener('click',()=>closeEventDetailPanel(panel));
+    eventDetailPanels.appendChild(panel);
+
+    const panelCount=eventCountyPanels.size+eventAlertPanels.size;
+    const rect=panel.getBoundingClientRect();
+    const offset=(panelCount % 8)*24;
+    panel.style.left=Math.max(0,(window.innerWidth-rect.width)/2+offset-84)+"px";
+    panel.style.top=Math.min(Math.max(12,92+offset),Math.max(12,window.innerHeight-rect.height))+"px";
+    panel.style.transform="none";
+    clampEventDetailPanel(panel);
+    return panel;
+}
+
+function bringEventDetailPanelToFront(panel){
+    panel.style.zIndex=String(++eventDetailPanelZIndex);
+}
+
+function renderEventCountyPanelContent(panel,title){
+    const heading=panel.querySelector('h3');
+    const body=panel.querySelector('.event-detail-body');
+    const counties=getEventTitleCountyDetails(title);
+    const alertCount=getAlertTitleSummary(rawData).alertTitleCounts[title] || 0;
+    const selectedAlertId=eventAlertPanelSelectedIds.get(title) || "";
+    const selectedCountyFips=focusedEventTitle === title ? focusedEventCountyFips : "";
+
+    heading.textContent=`${title} (${counties.length} counties / ${alertCount} alerts)`;
+    if(!counties.length){
+        body.innerHTML='<div class="alert">No included counties found</div>';
+    } else {
+        body.innerHTML=`
+            <div class="event-county-row">
+                <b>SAME</b>
+                <b>County</b>
+                <b class="event-county-count">Alerts</b>
+                <b class="event-county-expires">Expires</b>
+            </div>
+            ${counties.map(county=>{
+                const classes=["event-county-row"];
+                if(String(county.fips) === String(selectedCountyFips)) classes.push("county-selected");
+                if(countyHasAlertId(county.fips,selectedAlertId)) classes.push("alert-id-match");
+                return `
+                <div class="${classes.join(" ")}" data-fips="${escapeHtml(county.fips)}" data-title="${escapeHtml(title)}" title="Zoom to ${escapeHtml(county.name)}, ${escapeHtml(county.state)}">
+                    <span class="event-county-code">${escapeHtml(county.sameCode)}</span>
+                    <span class="event-county-name" title="${escapeHtml(county.name)}, ${escapeHtml(county.state)}">${escapeHtml(county.name)}, ${escapeHtml(county.state)}</span>
+                    <span class="event-county-count">${county.count}</span>
+                    <span class="event-county-expires" title="${Number.isFinite(county.expiresAt) ? escapeHtml(new Date(county.expiresAt).toLocaleString()) : "N/A"}">${escapeHtml(formatCountyExpirationTime(county.expiresAt))}</span>
+                </div>`;
+            }).join("")}`;
+    }
+
+    body.querySelectorAll('.event-county-row[data-fips]').forEach(row=>{
+        row.addEventListener('click',()=>{
+            focusEventCounty(row.dataset.title, row.dataset.fips);
+        });
+    });
+    const firstMatch=body.querySelector('.event-county-row.county-selected') ||
+        body.querySelector('.event-county-row.alert-id-match');
+    if(firstMatch){
+        firstMatch.scrollIntoView({ block:"nearest" });
+    }
+}
+
+function openEventAlertPanel(title){
+    let panel=eventAlertPanels.get(title);
+    if(!panel){
+        panel=createEventDetailPanel('alert',title);
+        eventAlertPanels.set(title,panel);
+    }
+    renderEventAlertPanelContent(panel,title);
+    bringEventDetailPanelToFront(panel);
+}
+
+function renderEventAlertPanelContent(panel,title){
+    const heading=panel.querySelector('h3');
+    const body=panel.querySelector('.event-detail-body');
+    const alerts=getEventTitleAlertDetails(title);
+    const countyAlertIds=focusedEventTitle === title && focusedEventCountyFips
+        ? getCountyEventAlertIds(title,focusedEventCountyFips)
+        : new Set();
+
+    heading.textContent=`${title} (${alerts.length} unique alerts)`;
+    if(!alerts.length){
+        body.innerHTML='<div class="alert">No active alert hashes found</div>';
+    } else {
+        body.innerHTML=`
+            <div class="event-alert-row">
+                <b>Hash</b>
+                <b>Headline</b>
+                <b class="event-alert-expires">Expires</b>
+            </div>
+            ${alerts.map(item=>{
+                const classes=["event-alert-row"];
+                if(item.id === eventAlertPanelSelectedIds.get(title)) classes.push("alert-id-selected");
+                if(countyAlertIds.has(item.id)) classes.push("county-alert-match");
+                return `
+                <div class="${classes.join(" ")}" data-alert-id="${escapeHtml(item.id)}" title="Show alert ${escapeHtml(item.hash)}">
+                    <span class="event-alert-hash">${escapeHtml(item.hash)}</span>
+                    <span class="event-alert-headline" title="${escapeHtml(item.headline)}">${escapeHtml(item.headline)}</span>
+                    <span class="event-alert-expires" title="${Number.isFinite(item.expiresAt) ? escapeHtml(new Date(item.expiresAt).toLocaleString()) : "N/A"}">${escapeHtml(formatCountyExpirationTime(item.expiresAt))}</span>
+                </div>`;
+            }).join("")}`;
+    }
+
+    body.querySelectorAll('.event-alert-row[data-alert-id]').forEach(row=>{
+        row.addEventListener('click',()=>showEventAlertById(title,row.dataset.alertId));
+    });
+    const firstMatch=body.querySelector('.event-alert-row.alert-id-selected') ||
+        body.querySelector('.event-alert-row.county-alert-match');
+    if(firstMatch){
+        firstMatch.scrollIntoView({ block:"nearest" });
+    }
+}
+
+function closeEventDetailPanel(panel){
+    if(!panel) return;
+    if(panel.dataset.type === 'county') eventCountyPanels.delete(panel.dataset.title);
+    if(panel.dataset.type === 'alert') eventAlertPanels.delete(panel.dataset.title);
+    if(panel.dataset.type === 'alert') eventAlertPanelSelectedIds.delete(panel.dataset.title);
+    if(draggedEventDetailPanel === panel) draggedEventDetailPanel=null;
+    panel.remove();
+}
+
+function closeTopmostEventDetailPanel(){
+    const panels=[...document.querySelectorAll('.event-detail-panel')];
+    if(!panels.length) return false;
+    panels.sort((a,b)=>(Number(b.style.zIndex) || 0)-(Number(a.style.zIndex) || 0));
+    closeEventDetailPanel(panels[0]);
+    return true;
+}
+
+function closeAllEventDetailPanels(){
+    [...document.querySelectorAll('.event-detail-panel')].forEach(closeEventDetailPanel);
+}
+
+function getHistoryAlertLocationLabel(fips){
+    const feature=countyFeatureByFips[fips];
+    if(!feature) return fips || "Unknown county";
+    const stateFips=String(feature.properties.STATE || "").padStart(2,'0');
+    const state=stateAbbreviations[stateFips] || stateFips;
+    return `${feature.properties.NAME || fips}, ${state} (${String(fips).padStart(5,'0')})`;
+}
+
+function renderHistoryAlertReferencePopup(panel,alertHash,result,statusText=""){
+    const heading=panel.querySelector('h3');
+    const body=panel.querySelector('.event-detail-body');
+    heading.textContent=`Alert ${alertHash}`;
+
+    if(statusText){
+        body.innerHTML=`<div class="alert">${escapeHtml(statusText)}</div>`;
+        return;
+    }
+
+    if(!result?.alert){
+        body.innerHTML=`<div class="alert">No matching alert found for ${escapeHtml(alertHash)}.</div>`;
+        return;
+    }
+
+    const alert=result.alert;
+    const frameTime=Number.isFinite(result.frame?.timestamp)
+        ? new Date(result.frame.timestamp).toLocaleString()
+        : "N/A";
+    const frameLabel=getAlertReferenceTreeFrameLabel(result);
+    body.innerHTML=`
+        <div class="alert">
+        <b>${escapeHtml(alert.event || "Untitled")}</b><br>
+        <span>${escapeHtml(alert.messageType || "Alert")}</span><br>
+        ${renderAlertMessageHashLine(alert)}
+        <b>County:</b> ${escapeHtml(getHistoryAlertLocationLabel(result.fips))}<br>
+        <b>Source:</b> ${escapeHtml(frameLabel)}<br>
+        <b>Frame time:</b> ${escapeHtml(frameTime)}<br>
+        <b>References:</b> ${renderAlertReferenceHashLinks(alert)}<br>
+        <i>${escapeHtml(alert.severity || "N/A")}</i><br><br>
+
+        <b>Start:</b> ${alert.sent ? escapeHtml(new Date(alert.sent).toLocaleString()) : "N/A"}<br>
+        <b>Expires:</b> ${alert.expires ? escapeHtml(new Date(alert.expires).toLocaleString()) : "N/A"}<br><br>
+
+        <b>Headline:</b><br>
+        ${escapeHtml(alert.headline || "No headline provided.")}<br><br>
+
+        <b>Description:</b><br>
+        ${escapeHtml(alert.description || "No description provided.")}<br>
+        ${renderAlertDescriptionHashLine(alert)}<br>
+
+        <b>ID:</b> ${renderAlertIdHashLink(alert)}
+        </div>`;
+}
+
+async function openAlertHashPopup(alertHash){
+    const hash=String(alertHash || "").trim().toLowerCase();
+    if(!hash) return;
+
+    const panel=createEventDetailPanel('history-reference',hash);
+    renderHistoryAlertReferencePopup(panel,hash,null,"Searching alerts...");
+    bringEventDetailPanelToFront(panel);
+
+    try{
+        const result=await findAnyAlertByHash(hash);
+        if(!panel.isConnected) return;
+        renderHistoryAlertReferencePopup(panel,hash,result);
+        clampEventDetailPanel(panel);
+    }catch(error){
+        console.warn("Unable to search for alert hash",error);
+        if(panel.isConnected){
+            renderHistoryAlertReferencePopup(panel,hash,null,"Unable to search alerts.");
+        }
+    }
+}
+
+function getAlertReferenceTreeIssuedLabel(result){
+    const alert=result?.alert;
+    const issued=getAlertIssuedTime(alert);
+    if(Number.isFinite(issued)) return new Date(issued).toLocaleString();
+    if(Number.isFinite(result?.frame?.timestamp)) return new Date(result.frame.timestamp).toLocaleString();
+    return "N/A";
+}
+
+function getAlertReferenceTreeFrameLabel(result){
+    if(result?.frame?.source === "current") return historyModeActive ? "current history frame" : "current alerts";
+    if(result?.frame?.source === "live") return "live alerts";
+    if(Number.isFinite(result?.frame?.timestamp)) return "saved " + new Date(result.frame.timestamp).toLocaleString();
+    return "not found in retained history";
+}
+
+async function buildAlertReferenceTreeNode(alertHash,seedResult=null,visited=new Set(),depth=0){
+    const hash=String(alertHash || "").trim().toLowerCase();
+    const node={
+        hash,
+        result:null,
+        children:[],
+        cycle:false,
+        depthLimit:false
+    };
+    if(!hash) return node;
+    if(visited.has(hash)){
+        node.cycle=true;
+        return node;
+    }
+    if(depth > 24){
+        node.depthLimit=true;
+        return node;
+    }
+
+    const nextVisited=new Set(visited);
+    nextVisited.add(hash);
+    node.result=seedResult || await findAnyAlertByHash(hash);
+
+    const references=getAlertReferenceHashes(node.result?.alert);
+    for(const referenceHash of references){
+        node.children.push(await buildAlertReferenceTreeNode(referenceHash,null,nextVisited,depth + 1));
+    }
+
+    return node;
+}
+
+function renderAlertReferenceTreeNode(node){
+    const result=node.result;
+    const alert=result?.alert;
+    const title=alert
+        ? escapeHtml(alert.event || alert.headline || "Untitled")
+        : "Not found";
+    const issued=alert ? escapeHtml(getAlertReferenceTreeIssuedLabel(result)) : "";
+    const source=escapeHtml(getAlertReferenceTreeFrameLabel(result));
+    const classes=["alert-reference-tree-node"];
+    if(!alert) classes.push("missing");
+
+    let status="";
+    if(node.cycle) status="Already shown above";
+    if(node.depthLimit) status="Reference depth limit reached";
+    if(!alert && !status) status="No retained history match";
+
+    return `
+        <div class="${classes.join(" ")}">
+            <div class="alert-reference-tree-row">
+                ${renderAlertHashPopupLink(node.hash)}
+                <span class="alert-reference-tree-meta">
+                    <div class="alert-reference-tree-title" title="${title}">${title}</div>
+                    ${issued ? `<div class="alert-reference-tree-time">Issued: ${issued}</div>` : ""}
+                    <div class="alert-reference-tree-time">${source}</div>
+                    ${status ? `<div>${escapeHtml(status)}</div>` : ""}
+                </span>
+            </div>
+            ${node.children.length ? `<div class="alert-reference-tree-children">${node.children.map(renderAlertReferenceTreeNode).join("")}</div>` : ""}
+        </div>`;
+}
+
+function renderAlertReferenceTreePopup(panel,alertHash,tree=null,statusText=""){
+    const heading=panel.querySelector('h3');
+    const body=panel.querySelector('.event-detail-body');
+    heading.textContent=`Reference Tree ${alertHash}`;
+    if(statusText){
+        body.innerHTML=`<div class="alert">${escapeHtml(statusText)}</div>`;
+        return;
+    }
+    body.innerHTML=`
+        <div class="alert-reference-tree-tools">
+            <button type="button" data-reference-tree-action="expand">Expand</button>
+            <button type="button" data-reference-tree-action="collapse">Collapse</button>
+        </div>
+        <div class="alert-reference-tree">${renderAlertReferenceTreeNode(tree)}</div>`;
+}
+
+async function openAlertReferenceTreePopup(alertHash){
+    const hash=String(alertHash || "").trim().toLowerCase();
+    if(!hash) return;
+
+    const panel=createEventDetailPanel('reference-tree',hash);
+    renderAlertReferenceTreePopup(panel,hash,null,"Building reference tree...");
+    bringEventDetailPanelToFront(panel);
+
+    try{
+        const seedResult=await findAnyAlertByHash(hash);
+        const tree=await buildAlertReferenceTreeNode(hash,seedResult);
+        if(!panel.isConnected) return;
+        renderAlertReferenceTreePopup(panel,hash,tree);
+        clampEventDetailPanel(panel);
+    }catch(error){
+        console.warn("Unable to build alert reference tree",error);
+        if(panel.isConnected){
+            renderAlertReferenceTreePopup(panel,hash,null,"Unable to build reference tree.");
+        }
+    }
+}
+
+function showEventAlertById(title,alertId){
+    focusedEventTitle="";
+    focusedEventCountyFips="";
+    clearFocusedEventCountyHighlight();
+    eventAlertPanelSelectedIds.set(title,alertId);
+    refreshEventAlertPanelIfOpen();
+    refreshEventCountyPanelIfOpen();
+
+    for(const [fips,alerts] of Object.entries(rawData)){
+        if(!(alerts || []).some(alert=>getAlertCountId(alert) === alertId)) continue;
+        const feature=countyFeatureByFips[fips];
+        if(!feature) continue;
+        showSidebar(fips,feature.properties.NAME || fips,feature,true,alertId);
+        return;
+    }
+}
+
+function focusEventCounty(title,fips){
+    const feature=countyFeatureByFips[fips];
+    const alerts=rawData[fips] || [];
+    if(!feature || !alerts.some(a=>(a.event || "Untitled") === title)) return;
+
+    const focusAlert=getMostRecentlyIssuedCountyEventAlert(title,fips);
+    const focusAlertId=focusAlert ? getAlertCountId(focusAlert) : null;
+
+    focusedEventTitle=title;
+    focusedEventCountyFips=fips;
+    eventAlertPanelSelectedIds.delete(title);
+    updateFocusedEventCountyHighlight();
+    refreshEventCountyPanelIfOpen();
+    refreshEventAlertPanelIfOpen();
+
+    const bounds=L.geoJson(feature).getBounds();
+    if(bounds.isValid()){
+        map.fitBounds(bounds,{ padding:[48,48], maxZoom:8, animate:true });
+    }
+
+    showSidebar(fips,feature.properties.NAME || fips,feature,true,focusAlertId);
+}
+
+function getEventTitleCounties(title){
+    return Object.entries(rawData)
+        .filter(([,alerts])=>alerts.some(a=>(a.event || "Untitled") === title))
+        .map(([fips])=>{
+            const feature=countyFeatureByFips[fips];
+            if(!feature) return null;
+            const stateFips=String(feature.properties.STATE).padStart(2,'0');
+            return {
+                fips,
+                sameCode:String(fips).padStart(5,'0'),
+                feature,
+                name:feature.properties.NAME || fips,
+                state:stateAbbreviations[stateFips] || stateFips
+            };
+        })
+        .filter(Boolean)
+        .sort(compareSameCode);
+}
+
+function cycleEventTitleCounty(title,direction){
+    const counties=getEventTitleCounties(title);
+    if(!counties.length) return;
+
+    const current=eventTitleCyclePositions[title] ?? (direction > 0 ? -1 : 0);
+    const next=(current + direction + counties.length) % counties.length;
+    eventTitleCyclePositions[title]=next;
+
+    focusEventCounty(title,counties[next].fips);
+}
+
+// ===== DATA =====
+function processAlerts(data){
+    const out={};
+    data.features.forEach(alert=>{
+        const p=alert.properties;
+        const codes=p.geocode?.SAME||[];
+
+        const obj={
+            id:alert.id,
+            event:p.event||"",
+            headline:p.headline||"",
+            description:p.description||"",
+            areaDesc:p.areaDesc||"",
+            severity:p.severity||"",
+            messageType:p.messageType||"",
+            references:p.references||[],
+            expires:p.expires,
+            sent:p.sent
+        };
+
+        codes.forEach(code=>{
+            const fips=sameToFips(code);
+            if(!out[fips]) out[fips]=[];
+            out[fips].push(obj);
+        });
+    });
+    return out;
+}
+
+function getAlertPolygonStyle(feature){
+    const category=getPriorityCategory(feature?.properties?.event);
+    const color=getColor(category);
+    const alertId=feature?.id || feature?.properties?.id;
+    const selected=selectedAlertPolygonIds.has(alertId);
+    return {
+        pane:"alertPolygonPane",
+        color,
+        weight:selected ? 6 : 3,
+        opacity:0.95,
+        fill:true,
+        fillColor:color,
+        fillOpacity:selected ? 0.65 : 0.4,
+        interactive:true
+    };
+}
+
+function getAlertFromFeature(feature){
+    const p=feature?.properties || {};
+    return {
+        id:feature?.id || p.id || "",
+        event:p.event || "Untitled",
+        headline:p.headline || "",
+        description:p.description || "",
+        areaDesc:p.areaDesc || "",
+        severity:p.severity || "",
+        messageType:p.messageType || "",
+        references:p.references || [],
+        expires:p.expires,
+        sent:p.sent
+    };
+}
+
+function showAlertPolygonsInSidebar(features){
+    if(!features.length) return;
+    openSidebar();
+    currentSidebarSelection=null;
+
+    const alerts=features
+        .map(getAlertFromFeature)
+        .sort((a,b)=>{
+            const aRank=prioritySettings.order.indexOf(getPriorityCategory(a.event));
+            const bRank=prioritySettings.order.indexOf(getPriorityCategory(b.event));
+            return aRank - bRank || new Date(a.expires) - new Date(b.expires);
+        });
+    let html=`<h3>NWS Alert Polygons (${alerts.length})</h3>`;
+    alerts.forEach(alert=>{
+        html+=`
+        <div class="alert" style="background:#fff7cc;border-left:4px solid ${getColor(getPriorityCategory(alert.event))};padding-left:8px;">
+        <b>${alert.event}</b><br>
+        <span>${alert.messageType || "Alert"}</span><br>
+        ${renderAlertMessageHashLine(alert)}
+        <i>${alert.severity}</i><br><br>
+
+        <b>Area:</b> ${alert.areaDesc || "N/A"}<br>
+        <b>Start:</b> ${alert.sent ? new Date(alert.sent).toLocaleString() : "N/A"}<br>
+        <b>Expires:</b> ${alert.expires ? new Date(alert.expires).toLocaleString() : "N/A"}<br>
+        <b>Expires in:</b> <span class="timer" data-exp="${alert.expires || ""}"></span><br><br>
+
+        <b>Headline:</b><br>${alert.headline || "No headline provided."}<br><br>
+        <b>Description:</b><br>${alert.description || "No description provided."}<br>
+        ${renderAlertDescriptionHashLine(alert)}<br>
+        <b>ID:</b> ${renderAlertIdHashLink(alert)}
+        </div>`;
+    });
+    content.innerHTML=html;
+}
+
+function getAlertPolygonLayersAt(latlng){
+    if(!alertPolygonLayer) return [];
+    const point=map.latLngToLayerPoint(latlng);
+    const matches=[];
+    alertPolygonLayer.eachLayer(layer=>{
+        if(typeof layer._containsPoint === "function" && layer._containsPoint(point)){
+            matches.push(layer);
+        }
+    });
+    return matches;
+}
+
+function selectAlertPolygonsAt(latlng){
+    const layers=getAlertPolygonLayersAt(latlng);
+    const features=layers.map(layer=>layer.feature).filter(Boolean);
+    selectedAlertPolygonIds=new Set(features.map(feature=>feature.id || feature.properties?.id).filter(Boolean));
+    if(alertPolygonLayer) alertPolygonLayer.setStyle(getAlertPolygonStyle);
+    showAlertPolygonsInSidebar(features);
+}
+
+function redrawAlertPolygonLayer(){
+    if(alertPolygonLayer){
+        map.removeLayer(alertPolygonLayer);
+        alertPolygonLayer=null;
+    }
+    if(!alertPolygonsVisible || historyModeActive) return;
+
+    const polygonFeatures=liveAlertFeatures
+        .filter(feature=>{
+            const type=feature?.geometry?.type;
+            return type === "Polygon" || type === "MultiPolygon";
+        })
+        .sort((a,b)=>{
+            const aRank=prioritySettings.order.indexOf(getPriorityCategory(a?.properties?.event));
+            const bRank=prioritySettings.order.indexOf(getPriorityCategory(b?.properties?.event));
+            return bRank - aRank;
+        });
+    if(!polygonFeatures.length) return;
+
+    alertPolygonLayer=L.geoJson({
+        type:"FeatureCollection",
+        features:polygonFeatures
+    },{
+        pane:"alertPolygonPane",
+        style:getAlertPolygonStyle,
+        interactive:true,
+        onEachFeature:(feature,layer)=>{
+            layer.on("click",event=>{
+                if(event.originalEvent) L.DomEvent.stopPropagation(event.originalEvent);
+                selectAlertPolygonsAt(event.latlng);
+            });
+        }
+    }).addTo(map);
+}
+
+function toggleAlertPolygons(){
+    alertPolygonsVisible=!alertPolygonsVisible;
+    redrawAlertPolygonLayer();
+}
+
+async function refresh(){
+    nextWeatherUpdate = Date.now() + weatherUpdateInterval;
+    const r=await fetch(ALERTS_URL);
+    const d=await r.json();
+    liveAlertFeatures=Array.isArray(d.features) ? d.features : [];
+    liveRawData=processAlerts(d);
+    if(historyRecordingEnabled){
+        weatherUpdatesSinceHistoryFrame++;
+    } else {
+        weatherUpdatesSinceHistoryFrame=0;
+    }
+    const shouldSaveHistorySnapshot=historyRecordingEnabled && weatherUpdatesSinceHistoryFrame >= historyFrameWeatherUpdates;
+    if(shouldSaveHistorySnapshot){
+        weatherUpdatesSinceHistoryFrame=0;
+    }
+
+    if(!historyModeActive){
+        rawData=liveRawData;
+        eventTitleCyclePositions={};
+        refreshEventFilterListIfOpen();
+        redrawMap();
+    }
+
+    if(shouldSaveHistorySnapshot){
+        saveHistorySnapshot(liveRawData).catch(error=>{
+            console.warn("Unable to save history snapshot",error);
+        });
+    }
+}
+
+function updateTornadoWarningBanner(){
+    const banner=document.getElementById('tornadoWarningBanner');
+    if(!banner) return;
+    if(historyMapActive){
+        banner.classList.remove('active');
+        return;
+    }
+
+    const hasTornadoWarning=Object.values(rawData).some(alerts =>
+        alerts.some(alert => getPriorityCategory(alert.event) === "tornado-warning")
+    );
+
+    banner.classList.toggle('active', hasTornadoWarning);
+}
+
+// ===== MAP =====
+function getPriorityCategory(event) {
+    event = (event || "").toLowerCase();
+    if (event.includes("tornado") && event.includes("warning")) return "tornado-warning";
+    if (event.includes("warning")) return "warning";
+    if (event.includes("watch")) return "watch";
+    if (event.includes("advisory")) return "advisory";
+    if (event.includes("statement")) return "statement";
+    return "other";
+}
+
+function getColor(category) {
+    return prioritySettings.colors[category] || DEFAULT_PRIORITY_COLORS[category] || DEFAULT_PRIORITY_COLORS.other;
+}
+
+function getAlertStyle(alerts, fillOpacity){
+    const categories = alerts.map(a => getPriorityCategory(a.event));
+    const highestCategory = prioritySettings.order.find(cat => categories.includes(cat)) || "other";
+    return {
+        fill:true,
+        fillColor:getColor(highestCategory),
+        fillOpacity,
+        color:"#000",
+        weight:0.4
+    };
+}
+
+function getInactiveCountyStyle(fillOpacity=0.05){
+    return {
+        fill:true,
+        fillColor:"#fff",
+        fillOpacity,
+        color:"#000",
+        weight:0.4
+    };
+}
+
+function ensureEventFocusPattern(){
+    const svg=map.getPanes().overlayPane.querySelector('svg');
+    if(!svg || svg.querySelector('#eventFocusHatch')) return;
+
+    const ns='http://www.w3.org/2000/svg';
+    const defs=document.createElementNS(ns,'defs');
+    const pattern=document.createElementNS(ns,'pattern');
+    pattern.setAttribute('id','eventFocusHatch');
+    pattern.setAttribute('patternUnits','userSpaceOnUse');
+    pattern.setAttribute('width','10');
+    pattern.setAttribute('height','10');
+    pattern.setAttribute('patternTransform','rotate(45)');
+
+    const baseLine=document.createElementNS(ns,'line');
+    baseLine.setAttribute('x1','0');
+    baseLine.setAttribute('y1','0');
+    baseLine.setAttribute('x2','0');
+    baseLine.setAttribute('y2','10');
+    baseLine.setAttribute('stroke','#fff');
+    baseLine.setAttribute('stroke-width','5');
+    baseLine.setAttribute('stroke-opacity','0.9');
+
+    const topLine=document.createElementNS(ns,'line');
+    topLine.setAttribute('x1','0');
+    topLine.setAttribute('y1','0');
+    topLine.setAttribute('x2','0');
+    topLine.setAttribute('y2','10');
+    topLine.setAttribute('stroke','#111');
+    topLine.setAttribute('stroke-width','2');
+    topLine.setAttribute('stroke-opacity','0.9');
+
+    pattern.appendChild(baseLine);
+    pattern.appendChild(topLine);
+    defs.appendChild(pattern);
+    svg.insertBefore(defs,svg.firstChild);
+}
+
+function clearFocusedEventCountyHighlight(){
+    if(eventFocusLayer){
+        map.removeLayer(eventFocusLayer);
+        eventFocusLayer=null;
+    }
+}
+
+function updateFocusedEventCountyHighlight(){
+    clearFocusedEventCountyHighlight();
+    if(!focusedEventTitle || !focusedEventCountyFips) return;
+
+    const feature=countyFeatureByFips[focusedEventCountyFips];
+    const alerts=rawData[focusedEventCountyFips] || [];
+    const stillImpacted=feature && alerts.some(a=>(a.event || "Untitled") === focusedEventTitle);
+    if(!stillImpacted){
+        focusedEventTitle="";
+        focusedEventCountyFips="";
+        return;
+    }
+
+    ensureEventFocusPattern();
+    eventFocusLayer=L.geoJson(feature,{
+        interactive:false,
+        style:{
+            fill:true,
+            fillColor:'url(#eventFocusHatch)',
+            fillOpacity:1,
+            color:'#111',
+            weight:2.5,
+            opacity:1
+        }
+    }).addTo(map);
+    ensureEventFocusPattern();
+    eventFocusLayer.bringToFront();
+}
+
+function getStateLabelText(feature){
+    const props = feature.properties || {};
+    const fips = String(props.STATE || props.STATEFP || feature.id || "").padStart(2,'0');
+    if(stateAbbreviations[fips]) return stateAbbreviations[fips];
+
+    const name = props.name || props.NAME || props.State || props.STATE_NAME;
+    return stateNameToAbbreviation[name] || "";
+}
+
+function buildStateLabelLayer(states){
+    stateLabelMarkers = [];
+    states.features.forEach(feature => {
+        const text = getStateLabelText(feature);
+        if(!text) return;
+
+        const center = L.geoJson(feature).getBounds().getCenter();
+        const marker = L.marker(center, {
+            interactive:false,
+            keyboard:false,
+            stateLabelText:text,
+            icon:createStateLabelIcon(text)
+        });
+        stateLabelMarkers.push(marker);
+    });
+    stateLabelLayer = L.layerGroup(stateLabelMarkers);
+}
+
+function getStateLabelFontSize(){
+    const zoom = map.getZoom();
+    return Math.round(Math.min(28, Math.max(14, 8 + zoom * 2)));
+}
+
+function getCurrentLocationCrossSize(){
+    const zoom = map.getZoom();
+    return Math.round(Math.min(54, Math.max(24, 12 + zoom * 4)));
+}
+
+function createStateLabelIcon(text){
+    const fontSize = getStateLabelFontSize();
+    const width = Math.round(fontSize * 2.6);
+    const height = Math.round(fontSize * 1.5);
+
+    return L.divIcon({
+        className:"state-label-icon",
+        html:`<span style="font-size:${fontSize}px;">${text}</span>`,
+        iconSize:[width,height],
+        iconAnchor:[width / 2,height / 2]
+    });
+}
+
+function removeCurrentLocationCrosshair(){
+    if(currentLocationCrosshair){
+        map.removeLayer(currentLocationCrosshair);
+        currentLocationCrosshair=null;
+    }
+}
+
+function createCurrentLocationCrosshair(){
+    const center = L.latLng(labelLocationLatLng[0],labelLocationLatLng[1]);
+    const size = getCurrentLocationCrossSize();
+    const point = map.latLngToLayerPoint(center);
+    const horizontalStart = map.layerPointToLatLng(L.point(point.x - size / 2,point.y));
+    const horizontalEnd = map.layerPointToLatLng(L.point(point.x + size / 2,point.y));
+    const verticalStart = map.layerPointToLatLng(L.point(point.x,point.y - size / 2));
+    const verticalEnd = map.layerPointToLatLng(L.point(point.x,point.y + size / 2));
+
+    const redWeight=Math.max(3,Math.round(size * 0.12));
+    const whiteWeight=redWeight + 4;
+
+    return L.featureGroup([
+        L.polyline([horizontalStart,horizontalEnd],{
+            color:"#fff",
+            weight:whiteWeight,
+            opacity:1,
+            interactive:false
+        }),
+        L.polyline([verticalStart,verticalEnd],{
+            color:"#fff",
+            weight:whiteWeight,
+            opacity:1,
+            interactive:false
+        }),
+        L.polyline([horizontalStart,horizontalEnd],{
+            color:"#d00000",
+            weight:redWeight,
+            opacity:1,
+            interactive:false
+        }),
+        L.polyline([verticalStart,verticalEnd],{
+            color:"#d00000",
+            weight:redWeight,
+            opacity:1,
+            interactive:false
+        })
+    ]);
+}
+
+function updateCurrentLocationMarker(){
+    if(!stateLabelsVisible || !labelLocationLatLng){
+        removeCurrentLocationCrosshair();
+        return;
+    }
+
+    removeCurrentLocationCrosshair();
+    currentLocationCrosshair=createCurrentLocationCrosshair().addTo(map);
+    currentLocationCrosshair.bringToFront();
+}
+
+function startCurrentLocationCross(){
+    updateCurrentLocationMarker();
+}
+
+function stopCurrentLocationCross(){
+    removeCurrentLocationCrosshair();
+}
+
+function updateStateLabelScale(){
+    if(!stateLabelsVisible || !stateLabelLayer) return;
+
+    stateLabelMarkers.forEach(marker => {
+        const text = marker.options.stateLabelText;
+        if(!text) return;
+        marker.setIcon(createStateLabelIcon(text));
+    });
+    updateCurrentLocationMarker();
+}
+
+function toggleStateLabels(){
+    stateLabelsVisible = !stateLabelsVisible;
+
+    if(stateLabelsVisible){
+        if(stateLabelLayer) stateLabelLayer.addTo(map);
+        updateStateLabelScale();
+        startCurrentLocationCross();
+    } else {
+        if(stateLabelLayer) map.removeLayer(stateLabelLayer);
+        stopCurrentLocationCross();
+    }
+}
+
+function getFeatureStyle(f){
+    if(historyMapActive){
+        return getHistoryMapFeatureStyle(f);
+    }
+
+    if(countyColorizationMode === 0){
+        return getInactiveCountyStyle();
+    }
+
+    const fips = getFips(f);
+    const filtered = getFiltered(fips);
+    if(!filtered.length){
+        if(countyColorizationMode === 2){
+            return getInactiveCountyStyle();
+        }
+        if(filters.eventTitleMode === "selected" && !filters.eventTitles.length){
+            const allAlerts = rawData[fips]||[];
+            return allAlerts.length
+                ? getAlertStyle(allAlerts, countyOpacityValue * 0.3)
+                : getInactiveCountyStyle();
+        }
+        if(rawData[fips] && rawData[fips].length > 0){
+            const allAlerts = rawData[fips];
+            return getAlertStyle(allAlerts, countyOpacityValue * 0.3);
+        } else {
+            return getInactiveCountyStyle(0.05);
+        }
+    }
+    return getAlertStyle(filtered, countyOpacityValue);
+}
+
+function redrawMap(){
+    updateTornadoWarningBanner();
+
+    Object.values(blinkIntervals).forEach(clearInterval);
+    blinkIntervals={};
+    clearActivePrecipTooltipTarget();
+
+    if(geoLayer) map.removeLayer(geoLayer);
+    clearFocusedEventCountyHighlight();
+
+    geoLayer=L.geoJson(geojsonData,{
+        style:getFeatureStyle,
+        onEachFeature:(f,layer)=>{
+            const fips=getFips(f);
+            const alerts=rawData[fips]||[];
+            const filteredAlerts=getFiltered(fips);
+            const name=f.properties.NAME;
+
+            let tooltip=historyMapActive
+                ? name+" ("+(historyMapCountyCounts[fips] || 0)+" history alerts)"
+                : name+" ("+alerts.length+")";
+
+            if(historyMapActive && showEventsToggle.checked && historyMapCountyEvents[fips]){
+                const rows=Object.entries(historyMapCountyEvents[fips])
+                    .sort((a,b)=>b[1]-a[1] || a[0].localeCompare(b[0]))
+                    .map(([event,count])=>`${escapeHtml(event)}: ${count}`);
+                tooltip+="<br>"+rows.join("<br>");
+            } else if(showEventsToggle.checked && alerts.length){
+                const events=[...new Set(alerts.map(a=>a.event))];
+                const colored=events.map(e =>
+                    `<span style="color:${getColor(getPriorityCategory(e))};font-weight:bold;">●</span> ${e}`
+                );
+                tooltip+="<br>"+colored.join("<br>");
+            }
+
+            layer.bindTooltip(tooltip);
+            layer.on("click",()=>showSidebar(fips,name,f));
+            layer.on("mousemove",(event)=>{
+                activeCountyCursorTarget={ layer, baseTooltip:tooltip, fips, name, feature:f, latlng:event.latlng };
+                trackPrecipTooltipTarget(layer,tooltip,event.latlng);
+            });
+            layer.on("mouseover",(event)=>{
+                activeCountyCursorTarget={ layer, baseTooltip:tooltip, fips, name, feature:f, latlng:event.latlng };
+                trackPrecipTooltipTarget(layer,tooltip,event.latlng);
+                if(historyMapActive){
+                    if(!(historyMapCountyCounts[fips] || 0)) return;
+                }
+                layer.setStyle({ fillColor: "#999", fillOpacity: countyOpacityValue });
+            });
+            layer.on("mouseout",()=>{
+                layer._precipTooltipToken=(layer._precipTooltipToken || 0) + 1;
+                layer._elevationTooltipToken=(layer._elevationTooltipToken || 0) + 1;
+                clearTimeout(layer._precipTooltipTimer);
+                layer.setTooltipContent(tooltip);
+                if(activePrecipTooltipTarget?.layer === layer) activePrecipTooltipTarget=null;
+                if(activeCountyCursorTarget?.layer === layer) activeCountyCursorTarget=null;
+                layer.setStyle(getFeatureStyle(f));
+            });
+
+            if(blinkToggle.checked &&
+               !historyMapActive &&
+               countyColorizationMode !== 0 &&
+               filteredAlerts.some(a=>
+                   String(a.messageType || "").toLowerCase() === "alert" &&
+                   ((getActiveTimestamp()-new Date(a.sent).getTime())/1000)<3600
+               )){
+                let visible=true;
+                blinkIntervals[fips]=setInterval(()=>{
+                    visible=!visible;
+                    layer.setStyle({
+                        fillOpacity: visible
+                            ? countyOpacityValue
+                            : Math.max(0.1,countyOpacityValue*0.4)
+                    });
+                },800);
+            }
+        }
+    }).addTo(map);
+
+    updateFocusedEventCountyHighlight();
+    redrawAlertPolygonLayer();
+    if(stateLayer) stateLayer.bringToFront();
+}
+
+// ===== STATE BORDER SCALING =====
+function updateStateBorderWeight(){
+    if(!stateLayer) return;
+    const zoom = map.getZoom();
+    const weight = Math.max(1.5, zoom * 0.5);
+    stateLayer.setStyle({ weight: weight });
+    updateStateLabelScale();
+}
+
+map.on("zoomend", updateStateBorderWeight);
+
+// ===== SIDEBAR =====
+function resizeMapAfterSidebarChange(){
+    requestAnimationFrame(() => {
+        map.invalidateSize();
+        setTimeout(() => map.invalidateSize(), 100);
+    });
+}
+
+function closeSidebar(){
+    document.body.classList.add('sidebar-closed');
+    resizeMapAfterSidebarChange();
+}
+
+function openSidebar(){
+    document.body.classList.remove('sidebar-closed');
+    resizeMapAfterSidebarChange();
+}
+
+function showSidebar(fips,name,f,shouldOpen=true,focusAlertId=null){
+    if(shouldOpen) openSidebar();
+    currentSidebarSelection={ fips, name, feature:f, focusAlertId };
+    const alerts=rawData[fips]||[];
+    const stateFips = String(f.properties.STATE).padStart(2,'0');
+    const countyFips = String(f.properties.COUNTY).padStart(3,'0');
+    const sameCode = stateFips + countyFips;
+    const stateAbbr = stateAbbreviations[stateFips] || stateFips;
+    let html = `<h3>${name}, ${stateAbbr} (${sameCode})</h3>`;
+    if(historyMapActive){
+        const count=historyMapCountyCounts[fips] || 0;
+        html += `<div class="alert"><b>History map:</b> ${historyMapRangeLabel || "selected period"}<br><b>Alerts:</b> ${count}</div>`;
+        html += `<div class="alert" id="historyMapCountyAlertList">Loading associated alerts...</div>`;
+        content.innerHTML=html;
+        loadHistoryMapCountyAlertsIntoSidebar(fips);
+        return;
+    }
+
+    if(historyModeActive && historyFrameTimestamp){
+        html += `<div class="alert"><b>History:</b> ${new Date(historyFrameTimestamp).toLocaleString()}</div>`;
+    }
+
+    if(!alerts.length){
+        content.innerHTML=html+"No alerts";
+        return;
+    }
+
+    const displayAlerts=[...alerts].sort((a,b)=>{
+        if(focusAlertId){
+            const aFocused=getAlertCountId(a) === focusAlertId;
+            const bFocused=getAlertCountId(b) === focusAlertId;
+            if(aFocused !== bFocused) return aFocused ? -1 : 1;
+        }
+        return new Date(a.expires) - new Date(b.expires);
+    });
+
+    displayAlerts.forEach(a=>{
+        const isFocused=focusAlertId && getAlertCountId(a) === focusAlertId;
+        html+=`
+        <div class="alert" ${isFocused ? 'style="background:#fff7cc;border-left:4px solid #d99a00;padding-left:8px;"' : ""}>
+        <b>${a.event}</b><br>
+        <span>${a.messageType || "Alert"}</span><br>
+        ${renderAlertMessageHashLine(a)}
+        <b>References:</b> ${renderAlertReferenceHashLinks(a)}<br>
+        <i>${a.severity}</i><br><br>
+
+        <b>Start:</b> ${a.sent ? new Date(a.sent).toLocaleString() : "N/A"}<br>
+        <b>Expires:</b> ${a.expires ? new Date(a.expires).toLocaleString() : "N/A"}<br>
+
+        <b>Expires in:</b>
+        <span class="timer" data-exp="${a.expires}" data-ref="${historyModeActive && historyFrameTimestamp ? historyFrameTimestamp : ""}"></span><br><br>
+
+        <b>Description:</b><br>
+        ${a.description || "No description provided."}<br>
+        ${renderAlertDescriptionHashLine(a)}<br>
+
+        <b>ID:</b> ${renderAlertIdHashLink(a)}
+        </div>`;
+    });
+
+    content.innerHTML=html;
+}
+
+async function loadHistoryMapCountyAlertsIntoSidebar(fips){
+    const token=++historyMapSidebarLoadToken;
+    const list=document.getElementById('historyMapCountyAlertList');
+    if(!list) return;
+
+    try{
+        const selection=getHistoryMapSelectionState();
+        const cacheKey=getHistoryMapSidebarCacheKey(fips,selection);
+        if(historyMapSidebarCache.has(cacheKey)){
+            const cachedHtml=historyMapSidebarCache.get(cacheKey);
+            historyMapSidebarCache.delete(cacheKey);
+            historyMapSidebarCache.set(cacheKey,cachedHtml);
+            list.outerHTML=cachedHtml;
+            return;
+        }
+
+        const candidates=getHistoryMapCountyFrameCandidates(fips,selection);
+        if(!candidates.length){
+            list.innerHTML="No matching history alerts";
+            return;
+        }
+
+        list.innerHTML="Loading associated alerts from " + candidates.length + (candidates.length === 1 ? " history frame..." : " history frames...");
+        const seenIds=new Set();
+        const mappedAlerts=[];
+
+        for(const candidate of candidates){
+            const frame=await loadHistoryFrame(candidate.timestamp);
+            if(token !== historyMapSidebarLoadToken || !historyMapActive) return;
+            const alerts=frame?.alerts?.[fips] || [];
+            if(!Array.isArray(alerts)) continue;
+            alerts.forEach(alert=>{
+                const id=getHistoryMapAlertId(alert);
+                if(!candidate.ids.has(id)) return;
+                if(seenIds.has(id)) return;
+                seenIds.add(id);
+                mappedAlerts.push(alert);
+            });
+        }
+
+        if(token !== historyMapSidebarLoadToken || !historyMapActive) return;
+        if(!mappedAlerts.length){
+            list.innerHTML="No matching history alerts";
+            return;
+        }
+
+        mappedAlerts.sort((a,b)=>{
+            const sentDelta=(new Date(a.sent || 0)) - (new Date(b.sent || 0));
+            if(sentDelta) return sentDelta;
+            return (a.event || "").localeCompare(b.event || "");
+        });
+
+        const html=mappedAlerts.map(a=>`
+            <div class="alert">
+            <b>${escapeHtml(a.event || "Untitled")}</b><br>
+            <span>${escapeHtml(a.messageType || "Alert")}</span><br>
+            ${renderAlertMessageHashLine(a)}
+            <b>References:</b> ${renderAlertReferenceHashLinks(a)}<br>
+            <i>${escapeHtml(a.severity || "N/A")}</i><br><br>
+
+            <b>Start:</b> ${a.sent ? new Date(a.sent).toLocaleString() : "N/A"}<br>
+            <b>Expires:</b> ${a.expires ? new Date(a.expires).toLocaleString() : "N/A"}<br><br>
+
+            <b>Headline:</b><br>
+            ${escapeHtml(a.headline || "No headline provided.")}<br><br>
+
+            <b>Description:</b><br>
+            ${escapeHtml(a.description || "No description provided.")}<br>
+            ${renderAlertDescriptionHashLine(a)}<br>
+
+            <b>ID:</b> ${renderAlertIdHashLink(a)}
+            </div>
+        `).join("");
+        cacheHistoryMapSidebarHtml(cacheKey,html);
+        list.outerHTML=html;
+    }catch(error){
+        console.warn("Unable to load history map county alerts",error);
+        if(token === historyMapSidebarLoadToken){
+            const currentList=document.getElementById('historyMapCountyAlertList');
+            if(currentList) currentList.innerHTML="Unable to load associated alerts.";
+        }
+    }
+}
+
+// ===== FILTERS =====
+function applyFilters(){
+    filters.severity=severityFilter.value;
+    filters.search=searchFilter.value.toLowerCase();
+    filters.expiredOnly=expiredOnlyToggle.checked;
+
+    filters.fields=[];
+    if(field_event.checked) filters.fields.push("event");
+    if(field_headline.checked) filters.fields.push("headline");
+    if(field_description.checked) filters.fields.push("description");
+    if(field_area.checked) filters.fields.push("areaDesc");
+    if(field_id.checked) filters.fields.push("id");
+
+    redrawMap();
+}
+
+function clearSearch(){
+    searchFilter.value="";
+    filters.search="";
+    redrawMap();
+}
+
+// ===== RADAR =====
+function createRadarLayer(timestamp=Date.now()){
+    return L.tileLayer(
+        RADAR_TILE_URL+"?_t="+timestamp,
+        {opacity: radarOpacity.value/100}
+    );
+}
+
+function createHistoryRadarLayer(wmsTime){
+    return L.tileLayer.wms(HISTORY_RADAR_WMS_URL,{
+        layers:HISTORY_RADAR_WMS_LAYER,
+        format:"image/png",
+        transparent:true,
+        version:"1.1.1",
+        time:wmsTime,
+        opacity:radarOpacity.value/100,
+        attribution:"IEM NEXRAD WMS-T"
+    });
+}
+
+function toggleRadar(){
+    if(historyModeActive){
+        if(isHistoryPlaybackRunning()){
+            if(radarLayer) map.removeLayer(radarLayer);
+            radarLayer=null;
+            return;
+        }
+        const metadata=getCurrentHistoryFrameMetadata();
+        if(metadata) applyHistoryRadar(metadata);
+        return;
+    }
+
+    if(radarToggle.checked){
+        reloadRadar();
+    } else if(radarLayer){
+        map.removeLayer(radarLayer);
+    }
+}
+
+function reloadRadar(){
+    nextRadarUpdate = Date.now() + radarUpdateInterval;
+    currentRadarTimestamp = Date.now();
+    if(radarLayer) map.removeLayer(radarLayer);
+    radarLayer=createRadarLayer(currentRadarTimestamp);
+    if(radarToggle.checked) radarLayer.addTo(map);
+}
+
+function updateRadarOpacity(){
+    if(radarLayer) radarLayer.setOpacity(radarOpacity.value/100);
+}
+
+// ===== PRECIPITATION =====
+const precipPanel=document.getElementById('precipPanel');
+const precipHeader=document.getElementById('precipHeader');
+const precipButton=document.getElementById('precipButton');
+const precipStatus=document.getElementById('precipStatus');
+const precipLegendImage=document.getElementById('precipLegendImage');
+const precipLegendFallback=document.getElementById('precipLegendFallback');
+const precipScalePanel=document.getElementById('precipScalePanel');
+const precipScaleHeader=document.getElementById('precipScaleHeader');
+const lightningScalePanel=document.getElementById('lightningScalePanel');
+const lightningScaleHeader=document.getElementById('lightningScaleHeader');
+const ELEVATION_QUERY_URL="https://epqs.nationalmap.gov/v1/json";
+
+function isSpaceKeyEvent(e){
+    return e.key === " " || e.key === "Spacebar" || e.code === "Space";
+}
+
+function handlePrecipSpaceSample(e){
+    if(!isSpaceKeyEvent(e) || !isPrecipLayerEnabled()) return false;
+
+    e.preventDefault();
+    e.stopPropagation();
+    if(!e.repeat) sampleActivePrecipTooltipTarget();
+    return true;
+}
+
+function getElevationSampleUrl(latlng){
+    const params=new URLSearchParams({
+        x:String(latlng.lng),
+        y:String(latlng.lat),
+        units:"Feet",
+        wkid:"4326"
+    });
+    return ELEVATION_QUERY_URL + "?" + params.toString();
+}
+
+function parseElevationFeet(data){
+    const feet=Number(data?.value);
+    if(!Number.isFinite(feet) || feet <= -100000) return null;
+    return feet;
+}
+
+function formatElevationLine(feet,latlng){
+    if(feet === null) return "Altitude above sea level: unavailable";
+    const meters=feet * 0.3048;
+    return `Altitude above sea level: ${Math.round(feet).toLocaleString()} ft (${Math.round(meters).toLocaleString()} m) at ${latlng.lat.toFixed(4)}, ${latlng.lng.toFixed(4)}`;
+}
+
+function setCountyTooltipElevationLine(layer,baseTooltip,text){
+    layer.setTooltipContent(baseTooltip + "<br>" + escapeHtml(text));
+}
+
+function handleCountyElevationSpaceSample(e){
+    if(!isSpaceKeyEvent(e) || isPrecipLayerEnabled()) return false;
+    if(!activeCountyCursorTarget || !activeCountyCursorTarget.latlng) return false;
+
+    e.preventDefault();
+    e.stopPropagation();
+    if(e.repeat) return true;
+
+    const target=activeCountyCursorTarget;
+    const layer=target.layer;
+    const baseTooltip=target.baseTooltip;
+    const latlng=target.latlng;
+    const token=(layer._elevationTooltipToken || 0) + 1;
+    layer._elevationTooltipToken=token;
+
+    setCountyTooltipElevationLine(layer,baseTooltip,"Altitude above sea level: loading...");
+    layer.openTooltip(latlng);
+
+    fetch(getElevationSampleUrl(latlng))
+        .then(response=>response.ok ? response.json() : Promise.reject(new Error("Elevation sample unavailable")))
+        .then(data=>{
+            if(layer._elevationTooltipToken !== token) return;
+            setCountyTooltipElevationLine(layer,baseTooltip,formatElevationLine(parseElevationFeet(data),latlng));
+            layer.openTooltip(latlng);
+        })
+        .catch(()=>{
+            if(layer._elevationTooltipToken !== token) return;
+            setCountyTooltipElevationLine(layer,baseTooltip,"Altitude above sea level: unavailable");
+            layer.openTooltip(latlng);
+        });
+
+    return true;
+}
+
+document.addEventListener("keydown",handlePrecipSpaceSample,true);
+document.addEventListener("keyup",(e)=>{
+    if(!isSpaceKeyEvent(e) || (!isPrecipLayerEnabled() && !activeCountyCursorTarget)) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+},true);
+
+function updateMapScalePanelVisibility(){
+    const showPrecip=Boolean(precipToggle && precipToggle.checked);
+    const showLightning=Boolean(lightningToggle && lightningToggle.checked);
+
+    if(precipScalePanel) precipScalePanel.classList.toggle('visible',showPrecip);
+    if(lightningScalePanel) lightningScalePanel.classList.toggle('visible',showLightning);
+    clampScalePanels();
+}
+
+function clampScalePanel(panel){
+    if(!panel || !panel.classList.contains('visible')) return;
+    const rect=panel.getBoundingClientRect();
+    const maxLeft=Math.max(0,window.innerWidth-rect.width);
+    const maxTop=Math.max(0,window.innerHeight-rect.height);
+    const left=Math.min(Math.max(rect.left,0),maxLeft);
+    const top=Math.min(Math.max(rect.top,0),maxTop);
+
+    panel.style.transform='none';
+    panel.style.left=left+"px";
+    panel.style.top=top+"px";
+}
+
+function clampScalePanels(){
+    clampScalePanel(precipScalePanel);
+    clampScalePanel(lightningScalePanel);
+}
+
+function beginScalePanelDrag(panel,e){
+    if(e.button !== 0) return;
+
+    const rect=panel.getBoundingClientRect();
+    panel.style.transform='none';
+    panel.style.left=rect.left+"px";
+    panel.style.top=rect.top+"px";
+    panel.classList.add('is-dragging');
+
+    isDraggingScalePanel=true;
+    scalePanelDragTarget=panel;
+    scalePanelDragOffset={
+        x:e.clientX-rect.left,
+        y:e.clientY-rect.top
+    };
+    e.preventDefault();
+}
+
+if(precipScaleHeader && precipScalePanel){
+    precipScaleHeader.addEventListener('mousedown',(e)=>beginScalePanelDrag(precipScalePanel,e));
+}
+
+if(lightningScaleHeader && lightningScalePanel){
+    lightningScaleHeader.addEventListener('mousedown',(e)=>beginScalePanelDrag(lightningScalePanel,e));
+}
+
+document.addEventListener('mousemove',(e)=>{
+    if(!isDraggingScalePanel || !scalePanelDragTarget) return;
+
+    const rect=scalePanelDragTarget.getBoundingClientRect();
+    const maxLeft=Math.max(0,window.innerWidth-rect.width);
+    const maxTop=Math.max(0,window.innerHeight-rect.height);
+    const left=Math.min(Math.max(e.clientX-scalePanelDragOffset.x,0),maxLeft);
+    const top=Math.min(Math.max(e.clientY-scalePanelDragOffset.y,0),maxTop);
+
+    scalePanelDragTarget.style.left=left+"px";
+    scalePanelDragTarget.style.top=top+"px";
+});
+
+document.addEventListener('mouseup',()=>{
+    if(scalePanelDragTarget) scalePanelDragTarget.classList.remove('is-dragging');
+    isDraggingScalePanel=false;
+    scalePanelDragTarget=null;
+});
+
+function openPrecipPanel(){
+    precipPanel.classList.add('open');
+    clampPrecipPanel();
+}
+
+function closePrecipPanel(){
+    precipPanel.classList.remove('open');
+}
+
+function togglePrecipPanel(){
+    if(precipPanel.classList.contains('open')){
+        closePrecipPanel();
+    } else {
+        openPrecipPanel();
+    }
+}
+
+function clampPrecipPanel(){
+    const rect=precipPanel.getBoundingClientRect();
+    const maxLeft=Math.max(0,window.innerWidth-rect.width);
+    const maxTop=Math.max(0,window.innerHeight-rect.height);
+    const left=Math.min(Math.max(rect.left,0),maxLeft);
+    const top=Math.min(Math.max(rect.top,0),maxTop);
+
+    precipPanel.style.left=left+"px";
+    precipPanel.style.top=top+"px";
+}
+
+precipHeader.addEventListener('mousedown',(e)=>{
+    if(e.button !== 0 || e.target.closest('button')) return;
+
+    const rect=precipPanel.getBoundingClientRect();
+    precipPanel.style.left=rect.left+"px";
+    precipPanel.style.top=rect.top+"px";
+
+    isDraggingPrecipPanel=true;
+    precipPanelDragOffset={
+        x:e.clientX-rect.left,
+        y:e.clientY-rect.top
+    };
+    e.preventDefault();
+});
+
+document.addEventListener('mousemove',(e)=>{
+    if(!isDraggingPrecipPanel) return;
+
+    const rect=precipPanel.getBoundingClientRect();
+    const maxLeft=Math.max(0,window.innerWidth-rect.width);
+    const maxTop=Math.max(0,window.innerHeight-rect.height);
+    const left=Math.min(Math.max(e.clientX-precipPanelDragOffset.x,0),maxLeft);
+    const top=Math.min(Math.max(e.clientY-precipPanelDragOffset.y,0),maxTop);
+
+    precipPanel.style.left=left+"px";
+    precipPanel.style.top=top+"px";
+});
+
+document.addEventListener('mouseup',()=>{
+    isDraggingPrecipPanel=false;
+});
+
+function createPrecipLayer(opacity=precipOpacity.value/100){
+    const range=precipRangeSelector.value;
+    const layerName=PRECIP_WMS_LAYERS[range] || PRECIP_WMS_LAYERS["1h"];
+    return L.tileLayer.wms(PRECIP_WMS_URL,{
+        layers:layerName,
+        styles:"",
+        format:"image/png",
+        transparent:true,
+        version:"1.3.0",
+        pane:"precipPane",
+        opacity:opacity,
+        tileSize:512,
+        keepBuffer:4,
+        updateWhenIdle:true,
+        updateWhenZooming:false,
+        detectRetina:false,
+        crossOrigin:true,
+        attribution:"NOAA/NWS MRMS QPE"
+    });
+}
+
+function getPrecipLayerName(){
+    const range=precipRangeSelector.value;
+    return PRECIP_WMS_LAYERS[range] || PRECIP_WMS_LAYERS["1h"];
+}
+
+function getPrecipLegendUrl(){
+    const params=new URLSearchParams({
+        SERVICE:"WMS",
+        VERSION:"1.3.0",
+        REQUEST:"GetLegendGraphic",
+        FORMAT:"image/png",
+        LAYER:getPrecipLayerName(),
+        STYLE:""
+    });
+    return PRECIP_WMS_URL + "?" + params.toString();
+}
+
+function isPrecipLayerEnabled(){
+    return Boolean(precipToggle && precipToggle.checked && precipLayer && map.hasLayer(precipLayer));
+}
+
+function getPrecipRasterFunctionName(){
+    const range=precipRangeSelector.value || "1h";
+    return "rft_" + range.replace("h","hr");
+}
+
+function getPrecipMosaicRule(){
+    const hours=String(parseInt(precipRangeSelector.value || "1h",10)).padStart(2,"0");
+    return {
+        mosaicMethod:"esriMosaicAttribute",
+        sortField:"name",
+        sortValue:"QPE_" + hours + "H",
+        ascending:true,
+        where:"idp_subset LIKE '%_QPE_" + hours + "H'"
+    };
+}
+
+function getPrecipSampleUrl(latlng){
+    const params=new URLSearchParams({
+        geometry:JSON.stringify({
+            x:latlng.lng,
+            y:latlng.lat,
+            spatialReference:{wkid:4326}
+        }),
+        geometryType:"esriGeometryPoint",
+        sampleDistance:"1",
+        sampleCount:"1",
+        returnFirstValueOnly:"true",
+        renderingRule:JSON.stringify({rasterFunction:getPrecipRasterFunctionName()}),
+        mosaicRule:JSON.stringify(getPrecipMosaicRule()),
+        f:"json"
+    });
+    return PRECIP_REST_URL + "/getSamples?" + params.toString();
+}
+
+function parsePrecipSampleInches(data){
+    const millimeters=Number(data?.samples?.[0]?.value);
+    if(!Number.isFinite(millimeters) || millimeters < 0) return null;
+
+    return millimeters / PRECIP_MM_PER_INCH;
+}
+
+function formatPrecipEstimate(value){
+    if(value === null) return "Precipitation: unavailable";
+    if(value > 0 && value < 0.005) return "Estimated precipitation: <0.01 in";
+    return `Estimated precipitation: ${value.toFixed(value < 1 ? 2 : 1)} in`;
+}
+
+function clearActivePrecipTooltipTarget(){
+    if(!activePrecipTooltipTarget) return;
+
+    const { layer, baseTooltip }=activePrecipTooltipTarget;
+    layer._precipTooltipToken=(layer._precipTooltipToken || 0) + 1;
+    clearTimeout(layer._precipTooltipTimer);
+    layer.setTooltipContent(baseTooltip);
+    activePrecipTooltipTarget=null;
+}
+
+function trackPrecipTooltipTarget(layer,baseTooltip,latlng){
+    activePrecipTooltipTarget={ layer, baseTooltip, latlng };
+
+    if(!isPrecipLayerEnabled() || historyMapActive) return;
+
+    layer._precipTooltipToken=(layer._precipTooltipToken || 0) + 1;
+    clearTimeout(layer._precipTooltipTimer);
+    layer.setTooltipContent(baseTooltip);
+}
+
+function sampleActivePrecipTooltipTarget(){
+    if(!activePrecipTooltipTarget || !isPrecipLayerEnabled() || historyMapActive) return false;
+
+    const { layer, baseTooltip, latlng }=activePrecipTooltipTarget;
+    appendPrecipEstimateToTooltip(layer,baseTooltip,latlng);
+    if(!layer.isTooltipOpen?.()){
+        layer.openTooltip(latlng);
+    }
+    return true;
+}
+
+function appendPrecipEstimateToTooltip(layer,baseTooltip,latlng){
+    if(!isPrecipLayerEnabled() || historyMapActive){
+        layer.setTooltipContent(baseTooltip);
+        return;
+    }
+
+    const token=(layer._precipTooltipToken || 0) + 1;
+    layer._precipTooltipToken=token;
+    clearTimeout(layer._precipTooltipTimer);
+    layer.setTooltipContent(baseTooltip + "<br>Estimated precipitation: loading...");
+
+    layer._precipTooltipTimer=setTimeout(()=>{
+        fetch(getPrecipSampleUrl(latlng))
+            .then(response=>response.ok ? response.json() : Promise.reject(new Error("Precipitation sample unavailable")))
+            .then(data=>{
+                if(layer._precipTooltipToken !== token) return;
+                layer.setTooltipContent(baseTooltip + "<br>" + escapeHtml(formatPrecipEstimate(parsePrecipSampleInches(data))));
+            })
+            .catch(()=>{
+                if(layer._precipTooltipToken !== token) return;
+                layer.setTooltipContent(baseTooltip + "<br>Estimated precipitation: unavailable");
+            });
+    },150);
+}
+
+function updatePrecipLegend(){
+    if(!precipLegendImage || !precipLegendFallback) return;
+    precipLegendFallback.hidden=true;
+    precipLegendImage.hidden=false;
+    precipLegendImage.src=getPrecipLegendUrl();
+}
+
+if(precipLegendImage){
+    precipLegendImage.addEventListener("error",()=>{
+        precipLegendImage.hidden=true;
+        if(precipLegendFallback) precipLegendFallback.hidden=false;
+    });
+}
+
+function refreshPrecipLayer(){
+    if(!precipToggle.checked) return;
+    if(historyModeActive){
+        disablePrecipLayer("Disabled in history mode");
+        return;
+    }
+
+    const token=++precipRefreshToken;
+    const previousLayer=precipLayer;
+    const rangeText=precipRangeSelector.options[precipRangeSelector.selectedIndex].text;
+    precipStatus.textContent="Loading " + rangeText + "...";
+    const nextLayer=createPrecipLayer(previousLayer ? 0 : precipOpacity.value/100);
+    let tileErrors=0;
+
+    nextLayer.once("load",()=>{
+        if(token !== precipRefreshToken || !precipToggle.checked){
+            map.removeLayer(nextLayer);
+            return;
+        }
+        if(previousLayer && map.hasLayer(previousLayer)) map.removeLayer(previousLayer);
+        nextLayer.setOpacity(precipOpacity.value/100);
+        precipLayer=nextLayer;
+        precipStatus.textContent=tileErrors
+            ? rangeText + " loaded, some tiles retrying"
+            : rangeText + " loaded";
+    });
+
+    nextLayer.on("tileerror",(event)=>{
+        const tile=event.tile;
+        const retries=Number(tile.dataset.precipRetries || 0);
+        if(retries < PRECIP_TILE_RETRY_LIMIT){
+            tile.dataset.precipRetries=String(retries + 1);
+            const retryUrl=tile.src.replace(/([?&])_retry=\d+(&|$)/,"$1").replace(/[?&]$/,"");
+            const separator=retryUrl.includes("?") ? "&" : "?";
+            setTimeout(()=>{
+                if(token === precipRefreshToken && precipToggle.checked){
+                    tile.src=retryUrl + separator + "_retry=" + (retries + 1) + "_" + Date.now();
+                }
+            },600 * (retries + 1));
+            return;
+        }
+
+        tileErrors++;
+        if(token === precipRefreshToken){
+            precipStatus.textContent=previousLayer
+                ? "NOAA/NWS slow, keeping previous layer"
+                : "NOAA/NWS tiles loading slowly";
+            console.warn("Unable to load NOAA/NWS precipitation tile");
+        }
+    });
+
+    nextLayer.addTo(map);
+    if(!previousLayer) precipLayer=nextLayer;
+}
+
+function togglePrecipLayer(){
+    precipRefreshToken++;
+    if(precipToggle.checked){
+        if(historyModeActive){
+            disablePrecipLayer("Disabled in history mode");
+            return;
+        }
+        if(document.activeElement === precipToggle || document.activeElement === precipButton){
+            document.activeElement.blur();
+        }
+        precipButton.classList.add('active');
+        updateMapScalePanelVisibility();
+        refreshPrecipLayer();
+    } else {
+        disablePrecipLayer("Off");
+    }
+}
+
+function disablePrecipLayer(statusText="Off"){
+    precipRefreshToken++;
+    precipToggle.checked=false;
+    precipButton.classList.remove('active');
+    clearActivePrecipTooltipTarget();
+    if(precipLayer){
+        map.removeLayer(precipLayer);
+        precipLayer=null;
+    }
+    precipStatus.textContent=statusText;
+    updateMapScalePanelVisibility();
+}
+
+function changePrecipRange(){
+    updatePrecipLegend();
+    if(precipToggle.checked) refreshPrecipLayer();
+}
+
+function updatePrecipOpacity(){
+    if(precipLayer) precipLayer.setOpacity(precipOpacity.value/100);
+}
+
+updatePrecipLegend();
+
+// ===== LIGHTNING =====
+const lightningPanel=document.getElementById('lightningPanel');
+const lightningHeader=document.getElementById('lightningHeader');
+const lightningButton=document.getElementById('lightningButton');
+const lightningStatus=document.getElementById('lightningStatus');
+const lightningLegendImage=document.getElementById('lightningLegendImage');
+
+function openLightningPanel(){
+    lightningPanel.classList.add('open');
+    clampLightningPanel();
+}
+
+function closeLightningPanel(){
+    lightningPanel.classList.remove('open');
+}
+
+function toggleLightningPanel(){
+    if(lightningPanel.classList.contains('open')){
+        closeLightningPanel();
+    } else {
+        openLightningPanel();
+    }
+}
+
+function clampLightningPanel(){
+    const rect=lightningPanel.getBoundingClientRect();
+    const maxLeft=Math.max(0,window.innerWidth-rect.width);
+    const maxTop=Math.max(0,window.innerHeight-rect.height);
+    const left=Math.min(Math.max(rect.left,0),maxLeft);
+    const top=Math.min(Math.max(rect.top,0),maxTop);
+
+    lightningPanel.style.left=left+"px";
+    lightningPanel.style.top=top+"px";
+}
+
+lightningHeader.addEventListener('mousedown',(e)=>{
+    if(e.button !== 0 || e.target.closest('button')) return;
+
+    const rect=lightningPanel.getBoundingClientRect();
+    lightningPanel.style.left=rect.left+"px";
+    lightningPanel.style.top=rect.top+"px";
+
+    isDraggingLightningPanel=true;
+    lightningPanelDragOffset={
+        x:e.clientX-rect.left,
+        y:e.clientY-rect.top
+    };
+    e.preventDefault();
+});
+
+document.addEventListener('mousemove',(e)=>{
+    if(!isDraggingLightningPanel) return;
+
+    const rect=lightningPanel.getBoundingClientRect();
+    const maxLeft=Math.max(0,window.innerWidth-rect.width);
+    const maxTop=Math.max(0,window.innerHeight-rect.height);
+    const left=Math.min(Math.max(e.clientX-lightningPanelDragOffset.x,0),maxLeft);
+    const top=Math.min(Math.max(e.clientY-lightningPanelDragOffset.y,0),maxTop);
+
+    lightningPanel.style.left=left+"px";
+    lightningPanel.style.top=top+"px";
+});
+
+document.addEventListener('mouseup',()=>{
+    isDraggingLightningPanel=false;
+});
+
+function createLightningLayer(opacity=lightningOpacity.value/100){
+    return L.tileLayer.wms(LIGHTNING_WMS_URL,{
+        layers:LIGHTNING_WMS_LAYER,
+        styles:LIGHTNING_WMS_STYLE,
+        format:"image/png",
+        transparent:true,
+        version:"1.3.0",
+        pane:"lightningPane",
+        opacity:opacity,
+        tileSize:512,
+        keepBuffer:4,
+        updateWhenIdle:true,
+        updateWhenZooming:false,
+        detectRetina:false,
+        crossOrigin:true,
+        _t:Date.now(),
+        attribution:"NOAA nowCOAST lightning density"
+    });
+}
+
+function getLightningLegendUrl(){
+    const params=new URLSearchParams({
+        SERVICE:"WMS",
+        VERSION:"1.3.0",
+        REQUEST:"GetLegendGraphic",
+        FORMAT:"image/png",
+        LAYER:LIGHTNING_WMS_LAYER,
+        STYLE:LIGHTNING_WMS_STYLE
+    });
+    return LIGHTNING_WMS_URL + "?" + params.toString();
+}
+
+function refreshLightningLayer(){
+    if(!lightningToggle.checked) return;
+    if(historyModeActive){
+        disableLightningLayer("Disabled in history mode");
+        return;
+    }
+
+    const token=++lightningRefreshToken;
+    const previousLayer=lightningLayer;
+    lightningStatus.textContent="Loading latest...";
+    const nextLayer=createLightningLayer(previousLayer ? 0 : lightningOpacity.value/100);
+    let tileErrors=0;
+
+    nextLayer.once("load",()=>{
+        if(token !== lightningRefreshToken || !lightningToggle.checked){
+            map.removeLayer(nextLayer);
+            return;
+        }
+        if(previousLayer && map.hasLayer(previousLayer)) map.removeLayer(previousLayer);
+        nextLayer.setOpacity(lightningOpacity.value/100);
+        lightningLayer=nextLayer;
+        lightningStatus.textContent=tileErrors
+            ? "Loaded, some tiles retrying"
+            : "Loaded " + new Date().toLocaleTimeString();
+    });
+
+    nextLayer.on("tileerror",(event)=>{
+        const tile=event.tile;
+        const retries=Number(tile.dataset.lightningRetries || 0);
+        if(retries < LIGHTNING_TILE_RETRY_LIMIT){
+            tile.dataset.lightningRetries=String(retries + 1);
+            const retryUrl=tile.src.replace(/([?&])_retry=\d+(&|$)/,"$1").replace(/[?&]$/,"");
+            const separator=retryUrl.includes("?") ? "&" : "?";
+            setTimeout(()=>{
+                if(token === lightningRefreshToken && lightningToggle.checked){
+                    tile.src=retryUrl + separator + "_retry=" + (retries + 1) + "_" + Date.now();
+                }
+            },600 * (retries + 1));
+            return;
+        }
+
+        tileErrors++;
+        if(token === lightningRefreshToken){
+            lightningStatus.textContent=previousLayer
+                ? "NOAA nowCOAST slow, keeping previous layer"
+                : "NOAA nowCOAST tiles loading slowly";
+            console.warn("Unable to load NOAA nowCOAST lightning tile");
+        }
+    });
+
+    nextLayer.addTo(map);
+    if(!previousLayer) lightningLayer=nextLayer;
+}
+
+function startLightningRefreshTimer(){
+    if(lightningRefreshTimer) clearInterval(lightningRefreshTimer);
+    lightningRefreshTimer=setInterval(()=>{
+        if(lightningToggle.checked && !historyModeActive) refreshLightningLayer();
+    },LIGHTNING_REFRESH_INTERVAL);
+}
+
+function toggleLightningLayer(){
+    lightningRefreshToken++;
+    if(lightningToggle.checked){
+        if(historyModeActive){
+            disableLightningLayer("Disabled in history mode");
+            return;
+        }
+        lightningButton.classList.add('active');
+        updateMapScalePanelVisibility();
+        refreshLightningLayer();
+        startLightningRefreshTimer();
+    } else {
+        disableLightningLayer("Off");
+    }
+}
+
+function disableLightningLayer(statusText="Off"){
+    lightningRefreshToken++;
+    lightningToggle.checked=false;
+    lightningButton.classList.remove('active');
+    if(lightningLayer){
+        map.removeLayer(lightningLayer);
+        lightningLayer=null;
+    }
+    lightningStatus.textContent=statusText;
+    updateMapScalePanelVisibility();
+}
+
+function updateLightningOpacity(){
+    if(lightningLayer) lightningLayer.setOpacity(lightningOpacity.value/100);
+}
+
+// ===== CLOUDS =====
+const cloudButton=document.getElementById('cloudButton');
+
+function createCloudLayer(opacity=CLOUD_LAYER_OPACITY){
+    return L.tileLayer.wms(CLOUD_WMS_URL,{
+        layers:CLOUD_WMS_LAYER,
+        styles:"",
+        format:"image/png",
+        transparent:true,
+        version:"1.3.0",
+        pane:"cloudPane",
+        opacity:opacity,
+        tileSize:512,
+        keepBuffer:4,
+        updateWhenIdle:true,
+        updateWhenZooming:false,
+        detectRetina:false,
+        crossOrigin:true,
+        _t:Date.now(),
+        attribution:"NOAA nowCOAST satellite cloud imagery"
+    });
+}
+
+function setCloudButtonState(active,statusText){
+    cloudButton.classList.toggle('active',active);
+    cloudButton.textContent=active ? "Clouds on" : "Clouds";
+    cloudButton.title=statusText ? "Cloud layer (K): " + statusText : "Cloud layer (K)";
+}
+
+function refreshCloudLayer(){
+    if(!cloudLayer && !cloudButton.classList.contains('active')) return;
+    if(historyModeActive){
+        disableCloudLayer("Disabled in history mode");
+        return;
+    }
+
+    const token=++cloudRefreshToken;
+    const previousLayer=cloudLayer;
+    setCloudButtonState(true,"Loading latest");
+    const nextLayer=createCloudLayer(previousLayer ? 0 : CLOUD_LAYER_OPACITY);
+    let tileErrors=0;
+
+    nextLayer.once("load",()=>{
+        if(token !== cloudRefreshToken || !cloudButton.classList.contains('active')){
+            map.removeLayer(nextLayer);
+            return;
+        }
+        if(previousLayer && map.hasLayer(previousLayer)) map.removeLayer(previousLayer);
+        nextLayer.setOpacity(CLOUD_LAYER_OPACITY);
+        cloudLayer=nextLayer;
+        setCloudButtonState(true,tileErrors ? "Loaded, some tiles retrying" : "Loaded " + new Date().toLocaleTimeString());
+    });
+
+    nextLayer.on("tileerror",(event)=>{
+        const tile=event.tile;
+        const retries=Number(tile.dataset.cloudRetries || 0);
+        if(retries < CLOUD_TILE_RETRY_LIMIT){
+            tile.dataset.cloudRetries=String(retries + 1);
+            const retryUrl=tile.src.replace(/([?&])_retry=\d+(&|$)/,"$1").replace(/[?&]$/,"");
+            const separator=retryUrl.includes("?") ? "&" : "?";
+            setTimeout(()=>{
+                if(token === cloudRefreshToken && cloudButton.classList.contains('active')){
+                    tile.src=retryUrl + separator + "_retry=" + (retries + 1) + "_" + Date.now();
+                }
+            },600 * (retries + 1));
+            return;
+        }
+
+        tileErrors++;
+        if(token === cloudRefreshToken){
+            setCloudButtonState(true,previousLayer ? "NOAA nowCOAST slow, keeping previous layer" : "NOAA nowCOAST tiles loading slowly");
+            console.warn("Unable to load NOAA nowCOAST cloud tile");
+        }
+    });
+
+    nextLayer.addTo(map);
+    if(!previousLayer) cloudLayer=nextLayer;
+}
+
+function startCloudRefreshTimer(){
+    if(cloudRefreshTimer) clearInterval(cloudRefreshTimer);
+    cloudRefreshTimer=setInterval(()=>{
+        if(cloudButton.classList.contains('active') && !historyModeActive) refreshCloudLayer();
+    },CLOUD_REFRESH_INTERVAL);
+}
+
+function toggleCloudLayer(){
+    cloudRefreshToken++;
+    if(cloudButton.classList.contains('active')){
+        disableCloudLayer("Off");
+        return;
+    }
+    if(historyModeActive){
+        disableCloudLayer("Disabled in history mode");
+        return;
+    }
+
+    setCloudButtonState(true,"Loading latest");
+    refreshCloudLayer();
+    startCloudRefreshTimer();
+}
+
+function disableCloudLayer(statusText="Off"){
+    cloudRefreshToken++;
+    setCloudButtonState(false,statusText);
+    if(cloudLayer){
+        map.removeLayer(cloudLayer);
+        cloudLayer=null;
+    }
+}
+
+function disableLiveOnlyOverlays(statusText="Disabled in history mode"){
+    if(precipToggle.checked || precipLayer) disablePrecipLayer(statusText);
+    if(lightningToggle.checked || lightningLayer) disableLightningLayer(statusText);
+    if(cloudButton.classList.contains('active') || cloudLayer) disableCloudLayer(statusText);
+}
+
+if(lightningLegendImage) lightningLegendImage.src=getLightningLegendUrl();
+updateMapScalePanelVisibility();
+startLightningRefreshTimer();
+setCloudButtonState(false,"Off");
+
+function updateMapOpacity(){
+    const val=document.getElementById("mapOpacity").value;
+    const opacity=val/100;
+    if(currentBaseLayer && typeof currentBaseLayer.setOpacity === 'function'){
+        currentBaseLayer.setOpacity(opacity);
+    }
+}
+
+function updateCountyOpacity(){
+    const val=document.getElementById("countyOpacity").value;
+    countyOpacityValue=val/100;
+    redrawMap();
+}
+
+function switchMapType(){
+    const mapType = document.getElementById("mapTypeSelector").value;
+    map.removeLayer(currentBaseLayer);
+    currentBaseLayer = baseLayers[mapType].addTo(map);
+    updateMapOpacity();
+    if(cloudLayer) cloudLayer.bringToFront();
+    if(radarLayer) radarLayer.bringToFront();
+    if(stateLayer) stateLayer.bringToFront();
+}
+
+// ===== INIT =====
+setStartupStatus("counties","Counties: loading");
+fetch('https://raw.githubusercontent.com/plotly/datasets/master/geojson-counties-fips.json')
+.then(r=>r.json())
+.then(g=>{
+    geojsonData=g;
+    countyFeatureByFips={};
+    geojsonData.features.forEach(feature=>{
+        countyFeatureByFips[getFips(feature)]=feature;
+    });
+    startWeatherRefreshTimer();
+    setStartupStatus("counties","Counties: loading alerts");
+    refresh()
+        .then(()=>{
+            setStartupStatus("counties","Counties: colorized","done");
+            startHistoryBackgroundCachesAfterFirstMapPaint();
+        })
+        .catch(error=>{
+            setStartupStatus("counties","Alerts: unavailable","error");
+            console.warn("Unable to load initial alerts",error);
+            startHistoryBackgroundCachesAfterFirstMapPaint();
+        });
+})
+.catch(error=>{
+    setStartupStatus("counties","Counties: unavailable","error");
+    console.warn("Unable to load county geography",error);
+});
+
+setStartupStatus("states","States: loading");
+fetch('https://raw.githubusercontent.com/PublicaMundi/MappingAPI/master/data/geojson/us-states.json')
+.then(r=>r.json())
+.then(states=>{
+    stateLayer = L.geoJson(states, {
+        style: { color:"#000", weight:2.5, fill:false },
+        interactive:false
+    }).addTo(map);
+
+    buildStateLabelLayer(states);
+    if(stateLabelsVisible){
+        stateLabelLayer.addTo(map);
+        startCurrentLocationCross();
+    }
+    updateStateBorderWeight();
+    setStartupStatus("states","States: loaded","done");
+})
+.catch(error=>{
+    setStartupStatus("states","States: unavailable","error");
+    console.warn("Unable to load state geography",error);
+});
+
+startRadarRefreshTimer();
+
+// Prevent map keyboard shortcuts when typing in sidebar
+// Allow actual text input fields to receive characters.
+document.getElementById('sidebar').addEventListener('keydown', (e) => {
+    if (isFormControl(e.target)) return;
+    if (['c', 'C', 'r', 'R', 'm', 'M', 'i', 'o'].includes(e.key)) {
+        e.preventDefault();
+        e.stopPropagation();
+    }
+}, true);
+
+document.getElementById('sidebar').addEventListener('keyup', (e) => {
+    if (isFormControl(e.target)) return;
+    if (['c', 'C', 'r', 'R', 'm', 'M', 'i', 'o'].includes(e.key)) {
+        e.preventDefault();
+        e.stopPropagation();
+    }
+}, true);
+
+// ===== UPDATE TIMER =====
+setInterval(()=>{
+    const now = Date.now();
+    
+    // Calculate weather update countdown
+    let weatherDiff = Math.max(0, Math.ceil((nextWeatherUpdate - now) / 1000));
+    const weatherMins = Math.floor(weatherDiff / 60);
+    const weatherSecs = weatherDiff % 60;
+    document.getElementById('weatherCountdown').textContent = 
+        weatherMins + ':' + String(weatherSecs).padStart(2, '0');
+    
+    // Calculate radar update countdown
+    const radarUpdateElem = document.querySelector('#updateTimer .radar-update');
+    const radarCountdownElem = document.getElementById('radarCountdown');
+    
+    if(radarToggle.checked){
+        radarUpdateElem.classList.remove('inactive');
+        let radarDiff = Math.max(0, Math.ceil((nextRadarUpdate - now) / 1000));
+        const radarMins = Math.floor(radarDiff / 60);
+        const radarSecs = radarDiff % 60;
+        radarCountdownElem.textContent = 
+            radarMins + ':' + String(radarSecs).padStart(2, '0');
+    } else {
+        radarUpdateElem.classList.add('inactive');
+        radarCountdownElem.textContent = '--:--';
+    }
+}, 1000);
+
+// ===== RIGHT-CLICK PAN =====
+const mapElement = document.getElementById('map');
+
+// Check if map element is capturing keyboard events
+mapElement.addEventListener('keydown', (e) => {
+    e.stopPropagation(); // Prevent bubbling
+}, true);
+
+mapElement.addEventListener('keypress', (e) => {
+    e.stopPropagation(); // Prevent bubbling
+}, true);
+
+mapElement.addEventListener('mousedown', (e) => {
+    if (e.button !== 2) return; // Only right mouse button
+    e.preventDefault();
+    
+    const mapRect = mapElement.getBoundingClientRect();
+    const mapPoint = L.point(e.clientX - mapRect.left, e.clientY - mapRect.top);
+    const clickedLatLng = map.containerPointToLatLng(mapPoint);
+    map.panTo(clickedLatLng, { animate: true });
+});
+
+// Ensure document has focus for keyboard events
+mapElement.addEventListener('click', () => {
+    mapElement.blur(); // Remove focus from map
+    document.body.focus(); // Give focus to body
+});
+
+// Disable context menu on map
+mapElement.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+});
+
+// ===== KEYBOARD ZOOM CONTROLS =====
+let zoomInInterval = null;
+let zoomOutInterval = null;
+const storedMapViewsKey = 'nwsDashboardStoredMapViews';
+let storedMapViews = loadStoredMapViews();
+
+function isFormControl(element) {
+    if (!element) return false;
+    const tag = element.tagName?.toLowerCase();
+    return tag === 'input' || tag === 'textarea' || tag === 'select' || element.isContentEditable;
+}
+
+function shouldIgnoreShortcutEvent(e) {
+    const target = e.target;
+    return isFormControl(target) ||
+        (target.closest && target.closest('#sidebar')) ||
+        (target.closest && target.closest('#setupPanel') && !target.closest('#shortcutHelpButton'));
+}
+
+function loadStoredMapViews() {
+    try {
+        return JSON.parse(localStorage.getItem(storedMapViewsKey)) || {};
+    } catch (error) {
+        return {};
+    }
+}
+
+function saveStoredMapViews() {
+    localStorage.setItem(storedMapViewsKey, JSON.stringify(storedMapViews));
+}
+
+function getStoredViewDigit(e) {
+    const digitMatch = e.code?.match(/^(?:Digit|Numpad)([1-9])$/);
+    if (digitMatch) return digitMatch[1];
+    return /^[1-9]$/.test(e.key) ? e.key : '';
+}
+
+function storeMapView(slot) {
+    const center = map.getCenter();
+    storedMapViews[slot] = {
+        lat: center.lat,
+        lng: center.lng,
+        zoom: map.getZoom()
+    };
+    saveStoredMapViews();
+}
+
+function restoreMapView(slot) {
+    const view = storedMapViews[slot];
+    if (!view) return;
+    map.setView([view.lat, view.lng], view.zoom, { animate: true });
+}
+
+function togglePopupWindowsVisibility(){
+    document.body.classList.toggle('popup-windows-hidden');
+}
+
+document.addEventListener('keydown', (e) => {
+    if (shouldIgnoreShortcutEvent(e)) return;
+
+    const storedViewDigit = getStoredViewDigit(e);
+    if (storedViewDigit && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        e.preventDefault();
+        if (e.shiftKey) {
+            if (!e.repeat) {
+                storeMapView(storedViewDigit);
+            }
+        } else {
+            restoreMapView(storedViewDigit);
+        }
+        return;
+    }
+
+    if (e.key === 'Escape' && document.getElementById('shortcutHelpPanel').classList.contains('open')) {
+        closeShortcutHelpPanel();
+        return;
+    }
+
+    if (e.key === 'Escape' && document.getElementById('historyPanel').classList.contains('open')) {
+        closeHistoryPanel();
+        return;
+    }
+
+    if (e.key === 'Escape' && document.getElementById('historyMapPanel').classList.contains('open')) {
+        closeHistoryMapPanel();
+        return;
+    }
+
+    if (e.key === 'Escape' && document.getElementById('setupPanel').classList.contains('open')) {
+        closeSetupPanel();
+        return;
+    }
+
+    if (e.key === 'Escape' && document.getElementById('priorityPanel').classList.contains('open')) {
+        closePriorityPanel();
+        return;
+    }
+
+    if (e.key === 'Escape' && document.getElementById('precipPanel').classList.contains('open')) {
+        closePrecipPanel();
+        return;
+    }
+
+    if (e.key === 'Escape' && document.getElementById('lightningPanel').classList.contains('open')) {
+        closeLightningPanel();
+        return;
+    }
+
+    if (e.key === 'Escape' && document.getElementById('plotPanel').classList.contains('open')) {
+        closePlotPanel();
+        return;
+    }
+
+    if (e.key === 'Escape' && closeTopmostEventDetailPanel()) {
+        return;
+    }
+
+    if (e.key === 'Escape' && document.getElementById('eventFilterOverlay').classList.contains('open')) {
+        closeEventFilterPopup();
+        return;
+    }
+
+    if (document.getElementById('historyPanel').classList.contains('open') && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        if(e.key === 'n'){
+            e.preventDefault();
+            moveHistoryBy(getHistoryFramesPerStep());
+            return;
+        } else if(e.key === 'N'){
+            e.preventDefault();
+            moveHistoryBy(1);
+            return;
+        } else if(e.key === 'p'){
+            e.preventDefault();
+            moveHistoryBy(-getHistoryFramesPerStep());
+            return;
+        } else if(e.key === 'P'){
+            e.preventDefault();
+            moveHistoryBy(-1);
+            return;
+        }
+    }
+
+    if (e.key === '?') {
+        e.preventDefault();
+        toggleShortcutHelpPanel();
+        return;
+    } else if (e.key === 'w' || e.key === 'W') {
+        e.preventDefault();
+        togglePopupWindowsVisibility();
+        return;
+    } else if (handlePrecipSpaceSample(e)) {
+        return;
+    } else if (handleCountyElevationSpaceSample(e)) {
+        return;
+    } else if (e.key === 's' || e.key === 'S') {
+        if(document.getElementById('setupPanel').classList.contains('open')){
+            closeSetupPanel();
+        } else {
+            openSetupPanel();
+        }
+        return;
+    } else if (e.key === 'h' || e.key === 'H') {
+        const historyPanelElement=document.getElementById('historyPanel');
+        if(historyPanelElement.classList.contains('open') && historyPanelElement.classList.contains('minimized')){
+            restoreHistoryPanel();
+        } else if(historyPanelElement.classList.contains('open')){
+            closeHistoryPanel();
+        } else {
+            openHistoryPanel();
+        }
+        return;
+    } else if (e.key === 'a' || e.key === 'A') {
+        e.preventDefault();
+        toggleHistoryMapMode();
+        return;
+    } else if (e.key === 'u' || e.key === 'U') {
+        e.preventDefault();
+        togglePriorityPanel();
+        return;
+    } else if (e.key === 'g' || e.key === 'G') {
+        e.preventDefault();
+        togglePlotPanel();
+        return;
+    } else if (e.key === 't' || e.key === 'T') {
+        const eventFilterOverlayElement=document.getElementById('eventFilterOverlay');
+        if(eventFilterOverlayElement.classList.contains('open') && eventFilterOverlayElement.classList.contains('minimized')){
+            restoreEventFilterPopup();
+        } else {
+            openEventFilterPopup();
+        }
+        return;
+    } else if (e.key === 'q' || e.key === 'Q') {
+        e.preventDefault();
+        togglePrecipPanel();
+        return;
+    } else if (e.key === 'y' || e.key === 'Y') {
+        e.preventDefault();
+        toggleLightningPanel();
+        return;
+    } else if (e.key === 'k' || e.key === 'K') {
+        e.preventDefault();
+        toggleCloudLayer();
+        return;
+    } else if (e.key === 'c' || e.key === 'C') {
+        countyColorizationMode = (countyColorizationMode + 1) % 3;
+        redrawMap();
+        return;
+    } else if (e.key === 'r' || e.key === 'R') {
+        // Toggle radar on/off
+        radarToggle.checked = !radarToggle.checked;
+        toggleRadar();
+        return;
+    } else if (e.key === 'v' || e.key === 'V') {
+        e.preventDefault();
+        toggleAlertPolygons();
+        return;
+    } else if (e.key === 'm' || e.key === 'M') {
+        // Toggle between Street and Topological maps
+        const currentType = mapTypeSelector.value;
+        const newType = currentType === 'Street' ? 'Topological' : 'Street';
+        mapTypeSelector.value = newType;
+        switchMapType();
+        return;
+    } else if (e.key === 'l' || e.key === 'L') {
+        toggleStateLabels();
+        return;
+    } else if (e.key === 'i' || e.key === 'I') {
+        if(zoomInInterval) return;
+        e.preventDefault();
+        // Zoom immediately on key press
+        const currentZoom = map.getZoom();
+        const maxZoom = map.getMaxZoom();
+        if (currentZoom < maxZoom) {
+            map.setZoom(currentZoom + 1.0);
+        }
+        
+        // Then set up interval for continuous zooming
+        zoomInInterval = setInterval(() => {
+            const currentZoom = map.getZoom();
+            const maxZoom = map.getMaxZoom();
+            if (currentZoom < maxZoom) {
+                map.setZoom(currentZoom + 1.0);
+            }
+        }, 100);
+    } else if (e.key === 'o' || e.key === 'O') {
+        if(zoomOutInterval) return;
+        e.preventDefault();
+        // Zoom immediately on key press
+        const currentZoom = map.getZoom();
+        const minZoom = map.getMinZoom();
+        if (currentZoom > minZoom) {
+            map.setZoom(currentZoom - 1.0);
+        }
+        
+        // Then set up interval for continuous zooming
+        zoomOutInterval = setInterval(() => {
+            const currentZoom = map.getZoom();
+            const minZoom = map.getMinZoom();
+            if (currentZoom > minZoom) {
+                map.setZoom(currentZoom - 1.0);
+            }
+        }, 100);
+    }
+}, true); // Use capture
+
+document.addEventListener('keyup', (e) => {
+    if (shouldIgnoreShortcutEvent(e)) return;
+
+    if ((e.key === 'i' || e.key === 'I') && zoomInInterval) {
+        clearInterval(zoomInInterval);
+        zoomInInterval = null;
+    } else if ((e.key === 'o' || e.key === 'O') && zoomOutInterval) {
+        clearInterval(zoomOutInterval);
+        zoomOutInterval = null;
+    }
+}, true); // Use capture
