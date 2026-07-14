@@ -111,6 +111,11 @@ Webmap.services.dom.listenDocument('keydown',(e) => {
         return;
     }
 
+    if (e.key === 'Escape' && Webmap.services.dom.maybeById('countyHistoryPanel').classList.contains('open')) {
+        closeCountyHistoryPanel();
+        return;
+    }
+
     if (e.key === 'Escape' && closeTopmostEventDetailPanel()) {
         return;
     }

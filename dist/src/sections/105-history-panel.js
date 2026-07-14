@@ -20,10 +20,11 @@ async function clearHistorySnapshots(){
         Webmap.services.dom.maybeById('historyStatus').textContent="Clearing...";
         historyTime.textContent="Clearing saved history...";
         await nextPaint();
-        await withHistoryStores([HISTORY_STORE_NAME,RADAR_TILE_STORE_NAME,HISTORY_ALERT_HASH_STORE_NAME],"readwrite",(stores)=>{
+        await withHistoryStores([HISTORY_STORE_NAME,RADAR_TILE_STORE_NAME,HISTORY_ALERT_HASH_STORE_NAME,COUNTY_HISTORY_STORE_NAME],"readwrite",(stores)=>{
             stores[HISTORY_STORE_NAME].clear();
             stores[RADAR_TILE_STORE_NAME].clear();
             stores[HISTORY_ALERT_HASH_STORE_NAME].clear();
+            stores[COUNTY_HISTORY_STORE_NAME].clear();
         });
         updateHistoryClearProgress(45,"Saved history deleted");
         await nextPaint();
@@ -43,6 +44,9 @@ async function clearHistorySnapshots(){
         historyMapReady=true;
         historyMapCacheLoading=false;
         historyMapCacheLoadPromise=null;
+        countyHistoryBackfillReady=true;
+        countyHistoryBackfillLoading=false;
+        countyHistoryBackfillLoadPromise=null;
         historyFrameLoadToken++;
         historyFrameTimestamp=null;
         restoreLiveAlertDisplayAfterHistoryMap();

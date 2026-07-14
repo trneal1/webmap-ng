@@ -9,6 +9,15 @@ const eventPlotCanvas=Webmap.services.dom.byId('eventPlotCanvas');
 const plotCursorTooltip=Webmap.services.dom.byId('plotCursorTooltip');
 const plotStatus=Webmap.services.dom.byId('plotStatus');
 const plotHint=Webmap.services.dom.byId('plotHint');
+const countyHistoryPanel=Webmap.services.dom.byId('countyHistoryPanel');
+const countyHistoryHeader=Webmap.services.dom.byId('countyHistoryHeader');
+const countyHistoryTitle=Webmap.services.dom.byId('countyHistoryTitle');
+const countyHistoryStart=Webmap.services.dom.byId('countyHistoryStart');
+const countyHistoryStop=Webmap.services.dom.byId('countyHistoryStop');
+const countyHistoryEventTitles=Webmap.services.dom.byId('countyHistoryEventTitles');
+const countyHistoryCanvas=Webmap.services.dom.byId('countyHistoryCanvas');
+const countyHistoryStatus=Webmap.services.dom.byId('countyHistoryStatus');
+const countyHistorySummary=Webmap.services.dom.byId('countyHistorySummary');
 const historyMapPanel=Webmap.services.dom.byId('historyMapPanel');
 const historyMapHeader=Webmap.services.dom.byId('historyMapHeader');
 const historyMapQuickRange=Webmap.services.dom.byId('historyMapQuickRange');
@@ -18,6 +27,7 @@ const historyMapPanelStatus=Webmap.services.dom.byId('historyMapPanelStatus');
 const restoreEventFilterButton=Webmap.services.dom.byId('restoreEventFilterButton');
 const restorePriorityButton=Webmap.services.dom.byId('restorePriorityButton');
 const restorePlotButton=Webmap.services.dom.byId('restorePlotButton');
+const restoreCountyHistoryButton=Webmap.services.dom.byId('restoreCountyHistoryButton');
 const restoreHistoryMapButton=Webmap.services.dom.byId('restoreHistoryMapButton');
 const restoreHistoryButton=Webmap.services.dom.byId('restoreHistoryButton');
 
@@ -25,6 +35,7 @@ function updatePanelRestoreDock(){
     restoreEventFilterButton.classList.toggle('visible',minimizedPanels.eventFilter);
     restorePriorityButton.classList.toggle('visible',minimizedPanels.priority);
     restorePlotButton.classList.toggle('visible',minimizedPanels.plot);
+    restoreCountyHistoryButton.classList.toggle('visible',minimizedPanels.countyHistory);
     restoreHistoryMapButton.classList.toggle('visible',minimizedPanels.historyMap);
     restoreHistoryButton.classList.toggle('visible',minimizedPanels.history);
 }

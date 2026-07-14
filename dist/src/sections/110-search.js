@@ -185,6 +185,7 @@ function getEventTitleCountyDetails(title){
 function getEventTitleAlertDetails(title){
     const byId=new Map();
     Object.entries(rawData).forEach(([fips,alerts])=>{
+        if(!isEventTitleDisplayableCounty(fips)) return;
         (alerts || []).forEach(alert=>{
             if((alert.event || "Untitled") !== title) return;
             const id=getAlertCountId(alert);
@@ -285,7 +286,7 @@ function renderEventCountyPanelContent(panel,title){
     const heading=panel.querySelector('h3');
     const body=panel.querySelector('.event-detail-body');
     const counties=getEventTitleCountyDetails(title);
-    const alertCount=getAlertTitleSummary(rawData).alertTitleCounts[title] || 0;
+    const alertCount=getAlertTitleSummary(rawData,{ displayableCountiesOnly:true }).alertTitleCounts[title] || 0;
     const selectedAlertId=eventAlertPanelSelectedIds.get(title) || "";
     const selectedCountyFips=focusedEventTitle === title ? focusedEventCountyFips : "";
 

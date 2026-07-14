@@ -28,6 +28,18 @@ function openHistoryDb(){
             if(event.oldVersion && event.oldVersion < 5){
                 alertHashStore.clear();
             }
+            let countyHistoryStore;
+            if(!db.objectStoreNames.contains(COUNTY_HISTORY_STORE_NAME)){
+                countyHistoryStore=db.createObjectStore(COUNTY_HISTORY_STORE_NAME,{ keyPath:"id" });
+            } else {
+                countyHistoryStore=request.transaction.objectStore(COUNTY_HISTORY_STORE_NAME);
+            }
+            if(!countyHistoryStore.indexNames.contains("fipsTimestamp")){
+                countyHistoryStore.createIndex("fipsTimestamp",["fips","timestamp"]);
+            }
+            if(!countyHistoryStore.indexNames.contains("timestamp")){
+                countyHistoryStore.createIndex("timestamp","timestamp");
+            }
         };
         request.onsuccess=()=>resolve(request.result);
         request.onerror=()=>reject(request.error);
@@ -145,6 +157,7 @@ async function pruneOldHistorySnapshots(){
         store.delete(IDBKeyRange.upperBound(cutoff));
     });
     await pruneOldRadarTiles(cutoff);
+    await pruneOldCountyHistoryRecords(cutoff);
     await pruneStoredHistoryAlertHashIndex(cutoff);
     pruneHistoryAlertHashMemoryIndex(cutoff);
 }
@@ -198,13 +211,130 @@ async function saveHistorySnapshot(alerts,timestamp=Date.now()){
             await pruneStoredHistoryAlertHashIndex(cutoff);
             pruneHistoryAlertHashMemoryIndex(cutoff);
             await saveHistoryAlertHashFrameEntries(snapshot);
+            await saveCountyHistorySnapshotRecords(snapshot);
         }catch(indexError){
-            console.warn("Unable to update alert hash index",indexError);
+            console.warn("Unable to update history indexes",indexError);
         }
         updateHistoryCachesWithSnapshot(snapshot);
     }catch(error){
         console.warn("Unable to save history snapshot",error);
     }
+}
+
+function getCountyHistoryRecordId(fips,timestamp){
+    return String(fips || "") + ":" + String(timestamp);
+}
+
+function createCountyHistoryRecord(fips,timestamp,alerts){
+    return {
+        id:getCountyHistoryRecordId(fips,timestamp),
+        fips:String(fips || ""),
+        timestamp,
+        alertCounts:getCountyFrameAlertCounts(alerts)
+    };
+}
+
+function createCountyHistoryRecordsFromSnapshot(frame){
+    if(!frame || !Number.isFinite(frame.timestamp)) return [];
+    return Object.entries(frame.alerts || {})
+        .filter(([,alerts])=>Array.isArray(alerts) && alerts.length)
+        .map(([fips,alerts])=>createCountyHistoryRecord(fips,frame.timestamp,alerts));
+}
+
+async function saveCountyHistorySnapshotRecords(frame){
+    const records=createCountyHistoryRecordsFromSnapshot(frame);
+    if(!records.length) return;
+    await withHistoryStore("readwrite",(store)=>{
+        records.forEach(record=>store.put(record));
+    },COUNTY_HISTORY_STORE_NAME);
+}
+
+async function saveCountyHistoryRecords(records){
+    if(!Array.isArray(records) || !records.length) return;
+    await withHistoryStore("readwrite",(store)=>{
+        records.forEach(record=>store.put(record));
+    },COUNTY_HISTORY_STORE_NAME);
+}
+
+async function pruneOldCountyHistoryRecords(cutoff){
+    try{
+        await withHistoryStore("readwrite",(store)=>{
+            const request=store.index("timestamp").openCursor(IDBKeyRange.upperBound(cutoff));
+            request.onsuccess=()=>{
+                const cursor=request.result;
+                if(!cursor) return;
+                cursor.delete();
+                cursor.continue();
+            };
+        },COUNTY_HISTORY_STORE_NAME);
+    }catch(error){
+        console.warn("Unable to prune county history records",error);
+    }
+}
+
+async function loadCountyHistoryRecords(fips,start=-Infinity,stop=Infinity){
+    const records=[];
+    const lower=[String(fips || ""),Number.isFinite(start) ? start : 0];
+    const upper=[String(fips || ""),Number.isFinite(stop) ? stop : Date.now() + getHistoryRetentionMs()];
+    await withHistoryStore("readonly",(store)=>{
+        const request=store.index("fipsTimestamp").openCursor(IDBKeyRange.bound(lower,upper));
+        request.onsuccess=()=>{
+            const cursor=request.result;
+            if(!cursor) return;
+            const record=cursor.value;
+            if(record && Number.isFinite(record.timestamp)){
+                records.push({
+                    timestamp:record.timestamp,
+                    alertCounts:record.alertCounts || {}
+                });
+            }
+            cursor.continue();
+        };
+    },COUNTY_HISTORY_STORE_NAME);
+    return records.sort((a,b)=>a.timestamp-b.timestamp);
+}
+
+function startCountyHistoryBackfill(){
+    if(countyHistoryBackfillLoading) return countyHistoryBackfillLoadPromise;
+    const clearGeneration=historyClearGeneration;
+    countyHistoryBackfillLoading=true;
+    countyHistoryBackfillReady=false;
+
+    countyHistoryBackfillLoadPromise=(async()=>{
+        const cutoff=Date.now() - getHistoryRetentionMs();
+        await withHistoryStores([HISTORY_STORE_NAME,COUNTY_HISTORY_STORE_NAME],"readwrite",(stores)=>{
+            const countyStore=stores[COUNTY_HISTORY_STORE_NAME];
+            const pruneRequest=countyStore.index("timestamp").openCursor(IDBKeyRange.upperBound(cutoff));
+            pruneRequest.onsuccess=()=>{
+                const cursor=pruneRequest.result;
+                if(!cursor) return;
+                cursor.delete();
+                cursor.continue();
+            };
+
+            const request=stores[HISTORY_STORE_NAME].openCursor(IDBKeyRange.lowerBound(cutoff));
+            request.onsuccess=()=>{
+                const cursor=request.result;
+                if(!cursor) return;
+                const frame=cursor.value;
+                if(frame && Number.isFinite(frame.timestamp) && frame.alerts && typeof frame.alerts === "object"){
+                    createCountyHistoryRecordsFromSnapshot(frame)
+                        .forEach(record=>countyStore.put(record));
+                }
+                cursor.continue();
+            };
+        });
+        countyHistoryBackfillReady=clearGeneration === historyClearGeneration;
+        return countyHistoryBackfillReady;
+    })().catch(error=>{
+        countyHistoryBackfillReady=false;
+        console.warn("Unable to backfill county history records",error);
+        return false;
+    }).finally(()=>{
+        countyHistoryBackfillLoading=false;
+    });
+
+    return countyHistoryBackfillLoadPromise;
 }
 
 function createHistoryFrameMetadata(frame){
@@ -543,6 +673,17 @@ function getUniqueAlertCount(alertsByFips){
     return ids.size;
 }
 
+function getCountyFrameAlertCounts(alerts){
+    const idsByTitle=new Map();
+    (Array.isArray(alerts) ? alerts : []).forEach(alert=>{
+        if(!alert || typeof alert !== "object") return;
+        const title=alert.event || "Untitled";
+        if(!idsByTitle.has(title)) idsByTitle.set(title,new Set());
+        idsByTitle.get(title).add(getAlertCountId(alert));
+    });
+    return Object.fromEntries([...idsByTitle.entries()].map(([title,ids])=>[title,ids.size]));
+}
+
 async function refreshHistoryRetentionWindow(){
     if(historyIndexLoading || plotHistoryLoading){
         setTimeout(()=>{
@@ -566,6 +707,9 @@ async function refreshHistoryRetentionWindow(){
     historyMapCache={ frames:[], titleCounts:new Map() };
     historyMapReady=false;
     historyMapCacheLoadPromise=null;
+    countyHistoryBackfillReady=false;
+    countyHistoryBackfillLoading=false;
+    countyHistoryBackfillLoadPromise=null;
 
     const shouldRefreshOpenHistory=historyPanel.classList.contains('open');
     if(shouldRefreshOpenHistory){
@@ -578,6 +722,7 @@ async function refreshHistoryRetentionWindow(){
     }
 
     await startHistoryIndexBackgroundLoad();
+    await startCountyHistoryBackfill();
     await startPlotHistoryBackgroundLoad();
 
     if(shouldRefreshOpenHistory){
@@ -1110,6 +1255,7 @@ function startHistoryBackgroundCaches(){
     setStartupStatus("historyMap","History map: waiting for plot cache");
     runWhenIdle(()=>{
         startHistoryIndexBackgroundLoad().finally(()=>{
+            runWhenIdle(()=>startCountyHistoryBackfill(),600);
             runWhenIdle(()=>{
                 startHistoryAlertHashIndexBackgroundLoad().finally(()=>{
                     runWhenIdle(()=>startPlotHistoryBackgroundLoad(),1800);

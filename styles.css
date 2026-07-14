@@ -379,7 +379,8 @@ body.sidebar-closed #openSidebar {
 #eventFilterHeader .panel-header-buttons,
 #historyHeader .panel-header-buttons,
 #priorityHeader .panel-header-buttons,
-#plotHeader .panel-header-buttons {
+#plotHeader .panel-header-buttons,
+#countyHistoryHeader .panel-header-buttons {
     display:flex;
     align-items:center;
     gap:6px;
@@ -389,7 +390,8 @@ body.sidebar-closed #openSidebar {
 #priorityPanel.minimized,
 #historyPanel.minimized,
 #historyMapPanel.minimized,
-#plotPanel.minimized {
+#plotPanel.minimized,
+#countyHistoryPanel.minimized {
     display:none !important;
 }
 
@@ -1605,7 +1607,8 @@ body.history-active #historyMapBadges {
     background:#eee;
 }
 
-#plotPanel {
+#plotPanel,
+#countyHistoryPanel {
     position:fixed;
     top:96px;
     left:50%;
@@ -1627,11 +1630,13 @@ body.history-active #historyMapBadges {
     resize:both;
 }
 
-#plotPanel.open {
+#plotPanel.open,
+#countyHistoryPanel.open {
     display:block;
 }
 
-#plotHeader {
+#plotHeader,
+#countyHistoryHeader {
     display:flex;
     align-items:center;
     justify-content:space-between;
@@ -1642,19 +1647,23 @@ body.history-active #historyMapBadges {
     user-select:none;
 }
 
-#plotHeader h3 {
+#plotHeader h3,
+#countyHistoryHeader h3 {
     margin:0;
     font-size:15px;
 }
 
-#plotStatus {
+#plotStatus,
+#countyHistoryStatus {
     color:#444;
     font-family:monospace;
     margin-left:auto;
 }
 
 #minimizePlot,
-#closePlot {
+#closePlot,
+#minimizeCountyHistory,
+#closeCountyHistory {
     width:28px;
     height:28px;
     border:1px solid #333;
@@ -1665,7 +1674,8 @@ body.history-active #historyMapBadges {
     line-height:1;
 }
 
-#plotBody {
+#plotBody,
+#countyHistoryBody {
     display:grid;
     grid-template-rows:auto 1fr auto;
     gap:10px;
@@ -1674,21 +1684,25 @@ body.history-active #historyMapBadges {
     box-sizing:border-box;
 }
 
-#plotControls {
+#plotControls,
+#countyHistoryControls {
     display:flex;
     flex-wrap:wrap;
     align-items:end;
     gap:8px;
 }
 
-#plotControls label {
+#plotControls label,
+#countyHistoryControls label {
     display:flex;
     flex-direction:column;
     gap:3px;
 }
 
 #plotControls input,
-#plotControls select {
+#plotControls select,
+#countyHistoryControls input,
+#countyHistoryControls select {
     font-size:12px;
 }
 
@@ -1697,12 +1711,18 @@ body.history-active #historyMapBadges {
     min-height:92px;
 }
 
+#countyHistoryEventTitles {
+    width:240px;
+    min-height:92px;
+}
+
 #plotCountMode {
     width:140px;
     min-height:0;
 }
 
-#plotControls button {
+#plotControls button,
+#countyHistoryControls button {
     min-width:34px;
     height:28px;
     border:1px solid #333;
@@ -1712,11 +1732,14 @@ body.history-active #historyMapBadges {
 }
 
 #plotControls button:hover,
-#closePlot:hover {
+#countyHistoryControls button:hover,
+#closePlot:hover,
+#closeCountyHistory:hover {
     background:#eee;
 }
 
-#eventPlotCanvas {
+#eventPlotCanvas,
+#countyHistoryCanvas {
     width:100%;
     height:100%;
     min-height:190px;
@@ -1726,7 +1749,8 @@ body.history-active #historyMapBadges {
     cursor:crosshair;
 }
 
-#plotCanvasWrap {
+#plotCanvasWrap,
+#countyHistoryCanvasWrap {
     position:relative;
     min-height:190px;
 }
@@ -1779,6 +1803,18 @@ body.history-active #historyMapBadges {
 #plotHint {
     color:#555;
     min-height:16px;
+}
+
+#countyHistorySummary {
+    color:#555;
+    min-height:16px;
+}
+
+.county-history-link {
+    color:#0645ad;
+    cursor:pointer;
+    font-weight:bold;
+    text-decoration:underline;
 }
 
 .state-label-icon {

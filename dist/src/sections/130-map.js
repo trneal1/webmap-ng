@@ -294,6 +294,7 @@ function redrawMap(){
             let tooltip=historyMapActive
                 ? name+" ("+(historyMapCountyCounts[fips] || 0)+" history alerts)"
                 : name+" ("+alerts.length+")";
+            tooltip+=`<br><a href="#" class="county-history-link" data-click="openCountyHistoryFromTooltip" data-fips="${escapeHtml(fips)}" data-name="${escapeHtml(name)}">County history</a>`;
 
             if(historyMapActive && showEventsToggle.checked && historyMapCountyEvents[fips]){
                 const rows=Object.entries(historyMapCountyEvents[fips])
@@ -308,7 +309,7 @@ function redrawMap(){
                 tooltip+="<br>"+colored.join("<br>");
             }
 
-            layer.bindTooltip(tooltip);
+            layer.bindTooltip(tooltip,{ interactive:true });
             layer.on("click",()=>showSidebar(fips,name,f));
             layer.on("mousemove",(event)=>{
                 activeCountyCursorTarget={ layer, baseTooltip:tooltip, fips, name, feature:f, latlng:event.latlng };

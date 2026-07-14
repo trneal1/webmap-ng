@@ -135,6 +135,8 @@ let isDraggingShortcutHelpPanel=false;
 let shortcutHelpPanelDragOffset={ x:0, y:0 };
 let isDraggingPlotPanel=false;
 let plotPanelDragOffset={ x:0, y:0 };
+let isDraggingCountyHistoryPanel=false;
+let countyHistoryPanelDragOffset={ x:0, y:0 };
 let isDraggingHistoryMapPanel=false;
 let historyMapPanelDragOffset={ x:0, y:0 };
 let plotFrames=[];
@@ -144,10 +146,19 @@ let plotLoadToken=0;
 let plotCursorTimestamp=null;
 let isDraggingPlotCursor=false;
 let plotLastGeometry=null;
+let countyHistorySelection=null;
+let countyHistoryFrames=[];
+let countyHistorySeries=[];
+let countyHistoryLoading=false;
+let countyHistoryLoadToken=0;
+let countyHistoryBackfillReady=false;
+let countyHistoryBackfillLoading=false;
+let countyHistoryBackfillLoadPromise=null;
 let minimizedPanels={
     eventFilter:false,
     priority:false,
     plot:false,
+    countyHistory:false,
     historyMap:false,
     history:false
 };
@@ -276,6 +287,8 @@ function defineLiveStateProperty(name,getter,setter){
     ["shortcutHelpPanelDragOffset",()=>shortcutHelpPanelDragOffset,value=>{ shortcutHelpPanelDragOffset=value; }],
     ["isDraggingPlotPanel",()=>isDraggingPlotPanel,value=>{ isDraggingPlotPanel=value; }],
     ["plotPanelDragOffset",()=>plotPanelDragOffset,value=>{ plotPanelDragOffset=value; }],
+    ["isDraggingCountyHistoryPanel",()=>isDraggingCountyHistoryPanel,value=>{ isDraggingCountyHistoryPanel=value; }],
+    ["countyHistoryPanelDragOffset",()=>countyHistoryPanelDragOffset,value=>{ countyHistoryPanelDragOffset=value; }],
     ["isDraggingHistoryMapPanel",()=>isDraggingHistoryMapPanel,value=>{ isDraggingHistoryMapPanel=value; }],
     ["historyMapPanelDragOffset",()=>historyMapPanelDragOffset,value=>{ historyMapPanelDragOffset=value; }],
     ["plotFrames",()=>plotFrames,value=>{ plotFrames=value; }],
@@ -285,6 +298,14 @@ function defineLiveStateProperty(name,getter,setter){
     ["plotCursorTimestamp",()=>plotCursorTimestamp,value=>{ plotCursorTimestamp=value; }],
     ["isDraggingPlotCursor",()=>isDraggingPlotCursor,value=>{ isDraggingPlotCursor=value; }],
     ["plotLastGeometry",()=>plotLastGeometry,value=>{ plotLastGeometry=value; }],
+    ["countyHistorySelection",()=>countyHistorySelection,value=>{ countyHistorySelection=value; }],
+    ["countyHistoryFrames",()=>countyHistoryFrames,value=>{ countyHistoryFrames=value; }],
+    ["countyHistorySeries",()=>countyHistorySeries,value=>{ countyHistorySeries=value; }],
+    ["countyHistoryLoading",()=>countyHistoryLoading,value=>{ countyHistoryLoading=value; }],
+    ["countyHistoryLoadToken",()=>countyHistoryLoadToken,value=>{ countyHistoryLoadToken=value; }],
+    ["countyHistoryBackfillReady",()=>countyHistoryBackfillReady,value=>{ countyHistoryBackfillReady=value; }],
+    ["countyHistoryBackfillLoading",()=>countyHistoryBackfillLoading,value=>{ countyHistoryBackfillLoading=value; }],
+    ["countyHistoryBackfillLoadPromise",()=>countyHistoryBackfillLoadPromise,value=>{ countyHistoryBackfillLoadPromise=value; }],
     ["minimizedPanels",()=>minimizedPanels,value=>{ minimizedPanels=value; }],
     ["prioritySettings",()=>prioritySettings,value=>{ prioritySettings=value; }]
 ].forEach(([name,getter,setter])=>defineLiveStateProperty(name,getter,setter));

@@ -23,6 +23,7 @@ const webmapSectionScripts = [
     'src/sections/103-history-map.js',
     'src/sections/104-event-plot.js',
     'src/sections/105-history-panel.js',
+    'src/sections/106-county-history-panel.js',
     'src/sections/110-search.js',
     'src/sections/120-data.js',
     'src/sections/130-map.js',
