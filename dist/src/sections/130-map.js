@@ -294,7 +294,6 @@ function redrawMap(){
             let tooltip=historyMapActive
                 ? name+" ("+(historyMapCountyCounts[fips] || 0)+" history alerts)"
                 : name+" ("+alerts.length+")";
-            tooltip+=`<br><a href="#" class="county-history-link" data-click="openCountyHistoryFromTooltip" data-fips="${escapeHtml(fips)}" data-name="${escapeHtml(name)}">County history</a>`;
 
             if(historyMapActive && showEventsToggle.checked && historyMapCountyEvents[fips]){
                 const rows=Object.entries(historyMapCountyEvents[fips])

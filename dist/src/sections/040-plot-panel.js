@@ -16,6 +16,7 @@ const countyHistoryStart=Webmap.services.dom.byId('countyHistoryStart');
 const countyHistoryStop=Webmap.services.dom.byId('countyHistoryStop');
 const countyHistoryEventTitles=Webmap.services.dom.byId('countyHistoryEventTitles');
 const countyHistoryCanvas=Webmap.services.dom.byId('countyHistoryCanvas');
+const countyHistoryCursorTooltip=Webmap.services.dom.byId('countyHistoryCursorTooltip');
 const countyHistoryStatus=Webmap.services.dom.byId('countyHistoryStatus');
 const countyHistorySummary=Webmap.services.dom.byId('countyHistorySummary');
 const historyMapPanel=Webmap.services.dom.byId('historyMapPanel');

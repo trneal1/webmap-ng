@@ -299,11 +299,31 @@ function startCountyHistoryBackfill(){
     const clearGeneration=historyClearGeneration;
     countyHistoryBackfillLoading=true;
     countyHistoryBackfillReady=false;
+    setStartupStatus("countyBackfill","County history: processing saved frames");
+    setStartupTaskProgress("countyBackfill",0);
 
-    countyHistoryBackfillLoadPromise=(async()=>{
+    countyHistoryBackfillLoadPromise=withTimeout((async()=>{
         const cutoff=Date.now() - getHistoryRetentionMs();
         await withHistoryStores([HISTORY_STORE_NAME,COUNTY_HISTORY_STORE_NAME],"readwrite",(stores)=>{
             const countyStore=stores[COUNTY_HISTORY_STORE_NAME];
+            let total=0;
+            let processed=0;
+            let recordsWritten=0;
+            const updateProgress=()=>{
+                if(!total) return;
+                setStartupTaskProgress("countyBackfill",(processed / total) * 100);
+                setStartupStatus("countyBackfill","County history: " + processed + "/" + total + " frames, " + recordsWritten + " records");
+            };
+            const countRequest=stores[HISTORY_STORE_NAME].count(IDBKeyRange.lowerBound(cutoff));
+            countRequest.onsuccess=()=>{
+                total=countRequest.result || 0;
+                if(total){
+                    setStartupTaskProgress("countyBackfill",1);
+                    setStartupStatus("countyBackfill","County history: 0/" + total + " frames");
+                } else {
+                    setStartupTaskProgress("countyBackfill",100);
+                }
+            };
             const pruneRequest=countyStore.index("timestamp").openCursor(IDBKeyRange.upperBound(cutoff));
             pruneRequest.onsuccess=()=>{
                 const cursor=pruneRequest.result;
@@ -315,19 +335,29 @@ function startCountyHistoryBackfill(){
             const request=stores[HISTORY_STORE_NAME].openCursor(IDBKeyRange.lowerBound(cutoff));
             request.onsuccess=()=>{
                 const cursor=request.result;
-                if(!cursor) return;
+                if(!cursor){
+                    setStartupTaskProgress("countyBackfill",100);
+                    return;
+                }
+                processed++;
                 const frame=cursor.value;
                 if(frame && Number.isFinite(frame.timestamp) && frame.alerts && typeof frame.alerts === "object"){
-                    createCountyHistoryRecordsFromSnapshot(frame)
-                        .forEach(record=>countyStore.put(record));
+                    const records=createCountyHistoryRecordsFromSnapshot(frame);
+                    recordsWritten+=records.length;
+                    records.forEach(record=>countyStore.put(record));
                 }
+                if(processed === total || processed % 25 === 0) updateProgress();
                 cursor.continue();
             };
         });
         countyHistoryBackfillReady=clearGeneration === historyClearGeneration;
+        setStartupTaskProgress("countyBackfill",100);
+        setStartupStatus("countyBackfill",countyHistoryBackfillReady ? "County history: ready" : "County history: reset","done");
         return countyHistoryBackfillReady;
-    })().catch(error=>{
+    })(),HISTORY_STARTUP_TASK_TIMEOUT_MS,"County history backfill timed out").catch(error=>{
         countyHistoryBackfillReady=false;
+        setStartupTaskProgress("countyBackfill",100);
+        setStartupStatus("countyBackfill","County history: unavailable","error");
         console.warn("Unable to backfill county history records",error);
         return false;
     }).finally(()=>{
@@ -430,10 +460,11 @@ function normalizeHistoryAlertHashRecord(hash,entries,cutoff=Date.now() - getHis
     };
 }
 
-async function buildHistoryAlertHashIndex(){
+async function buildHistoryAlertHashIndex(onProgress=null){
     const cutoff=Date.now() - getHistoryRetentionMs();
     const index=new Map();
     let latestIndexedTimestamp=-Infinity;
+    if(typeof onProgress === "function") onProgress({ phase:"stored", percent:1, processed:0, total:0 });
 
     await withHistoryStore("readwrite",(store)=>{
         const request=store.openCursor();
@@ -461,7 +492,7 @@ async function buildHistoryAlertHashIndex(){
     },HISTORY_ALERT_HASH_STORE_NAME);
 
     historyAlertHashIndex=index;
-    await indexHistoryAlertHashesFromSnapshots(latestIndexedTimestamp);
+    await indexHistoryAlertHashesFromSnapshots(latestIndexedTimestamp,onProgress);
     return historyAlertHashIndex;
 }
 
@@ -547,15 +578,30 @@ async function loadHistoryAlertHashIndexChunk(afterTimestamp,limit=300){
         };
     });
 
-    return { entriesByHash, lastTimestamp, hasMore };
+    return { entriesByHash, lastTimestamp, hasMore, count };
 }
 
-async function indexHistoryAlertHashesFromSnapshots(sinceTimestamp){
+async function indexHistoryAlertHashesFromSnapshots(sinceTimestamp,onProgress=null){
     let afterTimestamp=Number.isFinite(sinceTimestamp) ? sinceTimestamp : -Infinity;
+    const total=historyIndexCache.filter(frame=>frame && Number.isFinite(frame.timestamp) && frame.timestamp > afterTimestamp).length;
+    let processed=0;
+
+    if(typeof onProgress === "function"){
+        onProgress({ phase:"snapshots", percent:total ? 1 : 100, processed, total });
+    }
 
     while(true){
         const chunk=await loadHistoryAlertHashIndexChunk(afterTimestamp);
         await saveHistoryAlertHashEntriesByHash(chunk.entriesByHash);
+        processed+=chunk.count || 0;
+        if(typeof onProgress === "function"){
+            onProgress({
+                phase:"snapshots",
+                percent:total ? Math.min(100,(processed / total) * 100) : 100,
+                processed,
+                total
+            });
+        }
         if(!chunk.hasMore) break;
         afterTimestamp=chunk.lastTimestamp;
     }
@@ -789,6 +835,7 @@ function updateHistoryCachesWithSnapshot(snapshot){
     populateHistoryMapEventTypeOptions(historyMapCache.titleCounts);
     syncOpenHistoryPanelFromCache();
     syncOpenPlotPanelFromCache();
+    syncOpenCountyHistoryPanelFromSnapshot(snapshot);
 }
 
 async function loadHistoryFrame(timestamp){
@@ -1163,7 +1210,11 @@ function startHistoryIndexBackgroundLoad(){
     setStartupStatus("history","History: reading saved frames");
     setStartupTaskProgress("history",0);
     historyIndexLoadPromise=(async()=>{
-        const frames=await loadHistorySnapshotsFromDb(null,percent=>setStartupTaskProgress("history",percent));
+        const frames=await withTimeout(
+            loadHistorySnapshotsFromDb(null,percent=>setStartupTaskProgress("history",percent)),
+            HISTORY_STARTUP_TASK_TIMEOUT_MS,
+            "History startup cache timed out"
+        );
         if(clearGeneration !== historyClearGeneration) return [];
         historyIndexCache=frames;
         historyIndexReady=true;
@@ -1172,6 +1223,8 @@ function startHistoryIndexBackgroundLoad(){
         syncOpenHistoryPanelFromCache();
         return frames;
     })().catch(error=>{
+        historyIndexReady=true;
+        historyIndexCache=[];
         setStartupTaskProgress("history",100);
         setStartupStatus("history","History: unavailable","error");
         console.warn("Unable to build background history index",error);
@@ -1184,12 +1237,27 @@ function startHistoryIndexBackgroundLoad(){
 
 function startHistoryAlertHashIndexBackgroundLoad(){
     setStartupStatus("alertRefs","Alert refs: indexing history");
-    return getHistoryAlertHashIndex()
+    setStartupTaskProgress("alertRefs",0);
+    return withTimeout(
+        buildHistoryAlertHashIndex(progress=>{
+            const percent=Number.isFinite(progress?.percent) ? progress.percent : 0;
+            setStartupTaskProgress("alertRefs",percent);
+            if(progress?.phase === "snapshots" && progress.total){
+                setStartupStatus("alertRefs","Alert refs: " + progress.processed + "/" + progress.total + " frames");
+            } else {
+                setStartupStatus("alertRefs","Alert refs: checking stored index");
+            }
+        }),
+        HISTORY_STARTUP_TASK_TIMEOUT_MS,
+        "Alert reference startup index timed out"
+    )
         .then(index=>{
+            setStartupTaskProgress("alertRefs",100);
             setStartupStatus("alertRefs","Alert refs: " + index.size + (index.size === 1 ? " hash" : " hashes"),"done");
             return index;
         })
         .catch(error=>{
+            setStartupTaskProgress("alertRefs",100);
             setStartupStatus("alertRefs","Alert refs: unavailable","error");
             console.warn("Unable to build alert reference hash index",error);
             return new Map();
@@ -1208,10 +1276,14 @@ function startPlotHistoryBackgroundLoad(){
         if(!historyIndexReady){
             await startHistoryIndexBackgroundLoad();
         }
-        const plotHistory=await loadPlotHistoryFramesFromDb(
-            null,
-            percent=>setStartupTaskProgress("plot",percent),
-            percent=>setStartupTaskProgress("historyMap",percent)
+        const plotHistory=await withTimeout(
+            loadPlotHistoryFramesFromDb(
+                null,
+                percent=>setStartupTaskProgress("plot",percent),
+                percent=>setStartupTaskProgress("historyMap",percent)
+            ),
+            HISTORY_STARTUP_TASK_TIMEOUT_MS,
+            "Plot startup cache timed out"
         );
         if(clearGeneration !== historyClearGeneration){
             return { frames:[], titleCounts:new Map(), historyMap:{ frames:[], titleCounts:new Map() } };
@@ -1234,6 +1306,10 @@ function startPlotHistoryBackgroundLoad(){
         syncOpenPlotPanelFromCache();
         return plotHistoryCache;
     })().catch(error=>{
+        plotHistoryCache={ frames:[], titleCounts:new Map() };
+        historyMapCache={ frames:[], titleCounts:new Map() };
+        plotHistoryReady=true;
+        historyMapReady=true;
         setStartupTaskProgress("plot",100);
         setStartupTaskProgress("historyMap",100);
         setStartupStatus("plot","Plot cache: unavailable","error");
@@ -1250,6 +1326,7 @@ function startHistoryBackgroundCaches(){
     if(startupBackgroundCachesStarted) return;
     startupBackgroundCachesStarted=true;
     setStartupStatus("history","History: waiting for map");
+    setStartupStatus("countyBackfill","County history: waiting for history");
     setStartupStatus("alertRefs","Alert refs: waiting for history");
     setStartupStatus("plot","Plot cache: waiting for history");
     setStartupStatus("historyMap","History map: waiting for plot cache");

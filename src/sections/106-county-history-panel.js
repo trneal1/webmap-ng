@@ -19,11 +19,12 @@ const countyHistoryPanelController=Webmap.services.panels.createPanelController(
     onClose:()=>{
         countyHistoryLoadToken++;
         countyHistoryLoading=false;
+        countyHistoryCursorTooltip.classList.remove('visible');
     },
     onRestore:()=>drawCountyHistoryPlot()
 });
 
-function openCountyHistoryFromTooltip(event){
+function openCountyHistoryFromCountyLink(event){
     if(event){
         event.preventDefault();
         event.stopPropagation();
@@ -51,6 +52,8 @@ function getSelectedCountyHistoryEventTitles(){
 }
 
 function clearCountyHistoryPlot(message="No data"){
+    countyHistoryLastGeometry=null;
+    updateCountyHistoryCursorTooltip([]);
     const context=countyHistoryCanvas.getContext('2d');
     context.clearRect(0,0,countyHistoryCanvas.width,countyHistoryCanvas.height);
     context.fillStyle="#fff";
@@ -176,12 +179,15 @@ function populateCountyHistoryEventTitles(titleTotals){
 
 function buildCountyHistorySeries(){
     const selectedTitles=getSelectedCountyHistoryEventTitles();
+    const range=getCountyHistoryRange();
     return selectedTitles.map(title=>({
         title,
-        points:countyHistoryFrames.map(frame=>({
-            timestamp:frame.timestamp,
-            value:frame.alertCounts[title] || 0
-        }))
+        points:countyHistoryFrames
+            .filter(frame=>frame.timestamp >= range.start && frame.timestamp <= range.stop)
+            .map(frame=>({
+                timestamp:frame.timestamp,
+                value:frame.alertCounts[title] || 0
+            }))
     }));
 }
 
@@ -246,6 +252,118 @@ function drawCountyHistoryAxes(context,width,height,margin,points,maxValue,dpr,x
     }
 }
 
+function getNearestCountyHistoryFrameTimestamp(timestamp,series){
+    const points=series[0]?.points || [];
+    if(!points.length) return null;
+    let best=points[0].timestamp;
+    let bestDelta=Math.abs(best - timestamp);
+    points.forEach(point=>{
+        const delta=Math.abs(point.timestamp - timestamp);
+        if(delta < bestDelta){
+            best=point.timestamp;
+            bestDelta=delta;
+        }
+    });
+    return best;
+}
+
+function getCountyHistoryCursorRows(series){
+    if(!countyHistoryCursorTimestamp) return [];
+    return series.map((item,index)=>{
+        const point=item.points.find(candidate=>candidate.timestamp === countyHistoryCursorTimestamp);
+        return {
+            title:item.title,
+            value:point?.value || 0,
+            color:getPlotColor(index)
+        };
+    });
+}
+
+function getCountyHistoryCursorSummary(series){
+    if(!countyHistoryCursorTimestamp) return "";
+    const rows=getCountyHistoryCursorRows(series);
+    const nonZero=rows.filter(row=>row.value > 0);
+    const shown=(nonZero.length ? nonZero : rows).slice(0,3);
+    const details=shown.map(row=>row.title + ": " + row.value).join(", ");
+    const more=rows.length > shown.length ? ", +" + (rows.length - shown.length) + " more" : "";
+    return new Date(countyHistoryCursorTimestamp).toLocaleString() + (details ? " | " + details + more : "");
+}
+
+function updateCountyHistoryCursorTooltip(series){
+    if(!countyHistoryCursorTimestamp || !series.length || !countyHistoryLastGeometry){
+        countyHistoryCursorTooltip.classList.remove('visible');
+        countyHistoryCursorTooltip.innerHTML="";
+        return;
+    }
+
+    const rows=getCountyHistoryCursorRows(series);
+    const nonZero=rows.filter(row=>row.value > 0);
+    const shown=(nonZero.length ? nonZero : rows).slice(0,8);
+    const hiddenCount=rows.length - shown.length;
+
+    countyHistoryCursorTooltip.innerHTML=`
+        <div class="plot-tooltip-time">${escapeHtml(new Date(countyHistoryCursorTimestamp).toLocaleString())}</div>
+        ${shown.map(row=>`
+            <div class="plot-tooltip-row">
+                <span class="plot-tooltip-swatch" style="background:${escapeHtml(row.color)}"></span>
+                <span class="plot-tooltip-title">${escapeHtml(row.title)}</span>
+                <b>${row.value}</b>
+            </div>
+        `).join("")}
+        ${hiddenCount > 0 ? `<div class="plot-tooltip-row">+${hiddenCount} more</div>` : ""}
+    `;
+    countyHistoryCursorTooltip.classList.add('visible');
+
+    requestAnimationFrame(()=>{
+        if(!countyHistoryLastGeometry || !countyHistoryCursorTimestamp) return;
+        const canvasRect=countyHistoryCanvas.getBoundingClientRect();
+        const wrapRect=countyHistoryCanvas.parentElement.getBoundingClientRect();
+        const tooltipRect=countyHistoryCursorTooltip.getBoundingClientRect();
+        const cursorX=countyHistoryLastGeometry.xScale(countyHistoryCursorTimestamp) / countyHistoryLastGeometry.dpr;
+        const preferredLeft=(canvasRect.left - wrapRect.left) + cursorX + 12;
+        const preferredTop=(canvasRect.top - wrapRect.top) + 12;
+        const maxLeft=Math.max(0,wrapRect.width - tooltipRect.width - 8);
+        const left=preferredLeft > maxLeft ? Math.max(8,preferredLeft - tooltipRect.width - 24) : preferredLeft;
+
+        countyHistoryCursorTooltip.style.left=Math.min(Math.max(left,8),maxLeft)+"px";
+        countyHistoryCursorTooltip.style.top=Math.min(Math.max(preferredTop,8),Math.max(8,wrapRect.height - tooltipRect.height - 8))+"px";
+    });
+}
+
+function drawCountyHistoryCursor(context,series,xScale,margin,height,dpr){
+    const points=series[0]?.points || [];
+    if(!points.length) return;
+
+    if(!countyHistoryCursorTimestamp || !points.some(point=>point.timestamp === countyHistoryCursorTimestamp)){
+        countyHistoryCursorTimestamp=points[points.length - 1].timestamp;
+    }
+
+    const x=xScale(countyHistoryCursorTimestamp);
+    context.save();
+    context.strokeStyle="#111";
+    context.lineWidth=1.5 * dpr;
+    context.setLineDash([5 * dpr,4 * dpr]);
+    context.beginPath();
+    context.moveTo(x,margin.top);
+    context.lineTo(x,height - margin.bottom);
+    context.stroke();
+    context.setLineDash([]);
+
+    context.fillStyle="#111";
+    context.beginPath();
+    context.arc(x,height - margin.bottom,5 * dpr,0,Math.PI * 2);
+    context.fill();
+    context.restore();
+    updateCountyHistoryCursorTooltip(series);
+}
+
+function getPaddedCountyHistoryMaxValue(series){
+    const dataMax=Math.max(0,...series.flatMap(item=>item.points.map(point=>point.value)));
+    if(dataMax <= 0) return 1;
+    if(dataMax === 1) return 2;
+    return Math.ceil(dataMax * 1.15);
+}
+
 function drawCountyHistoryLines(context,series,width,height,dpr){
     const points=series[0]?.points || [];
     const visibleSeries=series.filter(item=>item.points.some(point=>point.value > 0));
@@ -259,9 +377,11 @@ function drawCountyHistoryLines(context,series,width,height,dpr){
     const plotHeight=height - margin.top - margin.bottom;
     const minTime=points[0].timestamp;
     const maxTime=points[points.length - 1].timestamp;
-    const maxValue=Math.max(1,...series.flatMap(item=>item.points.map(point=>point.value)));
+    const maxValue=getPaddedCountyHistoryMaxValue(series);
     const xScale=timestamp=>margin.left + ((timestamp - minTime) / Math.max(1,maxTime - minTime)) * plotWidth;
     const yScale=value=>margin.top + plotHeight - (value / maxValue) * plotHeight;
+    const timeFromX=x=>minTime + ((x - margin.left) / Math.max(1,plotWidth)) * Math.max(1,maxTime - minTime);
+    countyHistoryLastGeometry={ margin, width, height, dpr, xScale, timeFromX, series };
 
     drawCountyHistoryAxes(context,width,height,margin,points,maxValue,dpr,xScale,yScale);
 
@@ -285,6 +405,8 @@ function drawCountyHistoryLines(context,series,width,height,dpr){
             context.fill();
         });
     });
+
+    drawCountyHistoryCursor(context,series,xScale,margin,height,dpr);
 
     if(series.length > 1){
         drawCountyHistoryLegend(context,series,width,dpr);
@@ -322,14 +444,47 @@ function drawCountyHistoryPlot(){
         clearCountyHistoryPlot("Select one or more alert types");
         return;
     }
+    if(!(countyHistorySeries[0]?.points || []).length){
+        clearCountyHistoryPlot("No saved history in range");
+        return;
+    }
 
     drawCountyHistoryLines(context,countyHistorySeries,width,height,dpr);
     const activeSeries=countyHistorySeries.filter(series=>series.points.some(point=>point.value > 0));
     const countyLabel=countyHistorySelection?.name || "County";
     setCountyHistoryStatus(countyLabel + ": " + countyHistoryFrames.length + (countyHistoryFrames.length === 1 ? " frame" : " frames"));
-    countyHistorySummary.textContent=activeSeries.length
+    const cursorSummary=getCountyHistoryCursorSummary(countyHistorySeries);
+    countyHistorySummary.textContent=cursorSummary || (activeSeries.length
         ? activeSeries.length + " selected alert trace" + (activeSeries.length === 1 ? "" : "s")
-        : "Selected alert types were not active in the plotted frames.";
+        : "Selected alert types were not active in the plotted frames.");
+}
+
+function handleCountyHistoryStopChange(){
+    countyHistoryStopAutoFollowLatest=false;
+    reloadCountyHistoryFromControls();
+}
+
+function shouldAutoExtendCountyHistoryStop(previousLatestTimestamp){
+    if(!countyHistoryStop.value) return true;
+    if(countyHistoryStopAutoFollowLatest) return true;
+    return Number.isFinite(previousLatestTimestamp) && countyHistoryStop.value === formatDateTimeLocal(previousLatestTimestamp);
+}
+
+function updateCountyHistoryCursorFromClientX(clientX){
+    if(!countyHistoryLastGeometry) return;
+
+    const rect=countyHistoryCanvas.getBoundingClientRect();
+    const x=(clientX - rect.left) * countyHistoryLastGeometry.dpr;
+    const clampedX=Math.min(
+        Math.max(x,countyHistoryLastGeometry.margin.left),
+        countyHistoryLastGeometry.width - countyHistoryLastGeometry.margin.right
+    );
+    const timestamp=countyHistoryLastGeometry.timeFromX(clampedX);
+    const nearest=getNearestCountyHistoryFrameTimestamp(timestamp,countyHistoryLastGeometry.series);
+    if(!nearest) return;
+
+    countyHistoryCursorTimestamp=nearest;
+    drawCountyHistoryPlot();
 }
 
 async function reloadCountyHistoryFromControls(){
@@ -355,6 +510,38 @@ async function reloadCountyHistoryFromControls(){
         clearCountyHistoryPlot("Unable to load county history");
         console.warn("Unable to load county history",error);
     }
+}
+
+function syncOpenCountyHistoryPanelFromSnapshot(snapshot){
+    if(!countyHistoryPanel.classList.contains('open') || countyHistoryLoading || !countyHistorySelection) return;
+    if(!snapshot || !Number.isFinite(snapshot.timestamp)) return;
+
+    const previousLatestTimestamp=countyHistoryFrames[countyHistoryFrames.length - 1]?.timestamp;
+    const shouldExtendStop=shouldAutoExtendCountyHistoryStop(previousLatestTimestamp);
+    const alertCounts=getCountyFrameAlertCounts(snapshot.alerts?.[countyHistorySelection.fips] || []);
+    countyHistoryFrames=normalizeHistoryFrames([
+        ...countyHistoryFrames,
+        {
+            timestamp:snapshot.timestamp,
+            alertCounts
+        }
+    ]);
+    saveCountyHistoryRecords([{
+        id:getCountyHistoryRecordId(countyHistorySelection.fips,snapshot.timestamp),
+        fips:String(countyHistorySelection.fips || ""),
+        timestamp:snapshot.timestamp,
+        alertCounts
+    }]).catch(error=>{
+        console.warn("Unable to save live county history record",error);
+    });
+
+    if(shouldExtendStop){
+        countyHistoryStop.value=formatDateTimeLocal(snapshot.timestamp);
+        countyHistoryStopAutoFollowLatest=true;
+    }
+
+    populateCountyHistoryEventTitles(getCountyHistoryTotals(countyHistoryFrames));
+    drawCountyHistoryPlot();
 }
 
 async function openCountyHistoryPanel(fips,name){
@@ -386,6 +573,22 @@ function selectNoCountyHistoryEventTitles(){
     [...countyHistoryEventTitles.options].forEach(option=>{ option.selected=false; });
     drawCountyHistoryPlot();
 }
+
+Webmap.services.dom.listen(countyHistoryCanvas,'mousedown',(e)=>{
+    if(e.button !== 0) return;
+    isDraggingCountyHistoryCursor=true;
+    updateCountyHistoryCursorFromClientX(e.clientX);
+    e.preventDefault();
+});
+
+Webmap.services.dom.listenDocument('mousemove',(e)=>{
+    if(!isDraggingCountyHistoryCursor) return;
+    updateCountyHistoryCursorFromClientX(e.clientX);
+});
+
+Webmap.services.dom.listenDocument('mouseup',()=>{
+    isDraggingCountyHistoryCursor=false;
+});
 
 if(window.ResizeObserver){
     const countyHistoryResizeObserver=new ResizeObserver(()=>{

@@ -105,6 +105,55 @@ async function run(){
         await expectPanelOpen(page,"#plotPanel");
         await page.click("#closePlot");
 
+        const countyHistoryLinkScope = await page.evaluate(async()=>{
+            const originalReload = reloadCountyHistoryFromControls;
+            try{
+                reloadCountyHistoryFromControls = async()=>{
+                    countyHistoryFrames = [];
+                    setCountyHistoryStatus("stubbed");
+                };
+                showSidebar("01001","Autauga",{
+                    properties:{
+                        STATE:"01",
+                        COUNTY:"001",
+                        NAME:"Autauga"
+                    }
+                });
+                const link = document.querySelector("#content .county-history-link");
+                return {
+                    linkText:link?.textContent || "",
+                    clickAction:link?.dataset?.click || "",
+                    tooltipHandlerRegistered:Boolean(Webmap.actions["click:openCountyHistoryFromTooltip"]),
+                    countyHandlerRegistered:Boolean(Webmap.actions["click:openCountyHistoryFromCountyLink"])
+                };
+            }finally{
+                reloadCountyHistoryFromControls = originalReload;
+            }
+        });
+        assert.deepStrictEqual(countyHistoryLinkScope,{
+            linkText:"01001",
+            clickAction:"openCountyHistoryFromCountyLink",
+            tooltipHandlerRegistered:false,
+            countyHandlerRegistered:true
+        });
+
+        await page.evaluate(async()=>{
+            const originalReload = reloadCountyHistoryFromControls;
+            try{
+                reloadCountyHistoryFromControls = async()=>{
+                    countyHistoryFrames = [];
+                    setCountyHistoryStatus("stubbed");
+                };
+                document.querySelector("#content .county-history-link").click();
+                await new Promise(resolve=>setTimeout(resolve,0));
+            }finally{
+                reloadCountyHistoryFromControls = originalReload;
+            }
+        });
+        await expectPanelOpen(page,"#countyHistoryPanel");
+        assert.strictEqual(await page.textContent("#countyHistoryTitle"),"County History: Autauga");
+        await page.click("#closeCountyHistory");
+
         const eventTitleCountScope = await page.evaluate(()=>{
             const originalRawData = Webmap.state.rawData;
             const originalCountyFeatureByFips = Webmap.state.countyFeatureByFips;

@@ -90,6 +90,7 @@ let weatherUpdatesSinceHistoryFrame = 0;
 const startupStatusState = {
     setup:false,
     history:false,
+    countyBackfill:false,
     alertRefs:false,
     plot:false,
     historyMap:false,
@@ -151,6 +152,10 @@ let countyHistoryFrames=[];
 let countyHistorySeries=[];
 let countyHistoryLoading=false;
 let countyHistoryLoadToken=0;
+let countyHistoryCursorTimestamp=null;
+let isDraggingCountyHistoryCursor=false;
+let countyHistoryLastGeometry=null;
+let countyHistoryStopAutoFollowLatest=true;
 let countyHistoryBackfillReady=false;
 let countyHistoryBackfillLoading=false;
 let countyHistoryBackfillLoadPromise=null;
@@ -303,6 +308,10 @@ function defineLiveStateProperty(name,getter,setter){
     ["countyHistorySeries",()=>countyHistorySeries,value=>{ countyHistorySeries=value; }],
     ["countyHistoryLoading",()=>countyHistoryLoading,value=>{ countyHistoryLoading=value; }],
     ["countyHistoryLoadToken",()=>countyHistoryLoadToken,value=>{ countyHistoryLoadToken=value; }],
+    ["countyHistoryCursorTimestamp",()=>countyHistoryCursorTimestamp,value=>{ countyHistoryCursorTimestamp=value; }],
+    ["isDraggingCountyHistoryCursor",()=>isDraggingCountyHistoryCursor,value=>{ isDraggingCountyHistoryCursor=value; }],
+    ["countyHistoryLastGeometry",()=>countyHistoryLastGeometry,value=>{ countyHistoryLastGeometry=value; }],
+    ["countyHistoryStopAutoFollowLatest",()=>countyHistoryStopAutoFollowLatest,value=>{ countyHistoryStopAutoFollowLatest=value; }],
     ["countyHistoryBackfillReady",()=>countyHistoryBackfillReady,value=>{ countyHistoryBackfillReady=value; }],
     ["countyHistoryBackfillLoading",()=>countyHistoryBackfillLoading,value=>{ countyHistoryBackfillLoading=value; }],
     ["countyHistoryBackfillLoadPromise",()=>countyHistoryBackfillLoadPromise,value=>{ countyHistoryBackfillLoadPromise=value; }],

@@ -24,7 +24,8 @@ function showSidebar(fips,name,f,shouldOpen=true,focusAlertId=null){
     const countyFips = String(f.properties.COUNTY).padStart(3,'0');
     const sameCode = stateFips + countyFips;
     const stateAbbr = stateAbbreviations[stateFips] || stateFips;
-    let html = `<h3>${name}, ${stateAbbr} (${sameCode})</h3>`;
+    const countyHistoryLink=`<a href="#county-history-${encodeURIComponent(fips)}" class="county-history-link" data-click="openCountyHistoryFromCountyLink" data-fips="${escapeHtml(fips)}" data-name="${escapeHtml(name)}" title="Open county history for ${escapeHtml(name)}">${escapeHtml(sameCode)}</a>`;
+    let html = `<h3>${escapeHtml(name)}, ${escapeHtml(stateAbbr)} (${countyHistoryLink})</h3>`;
     if(historyMapActive){
         const count=historyMapCountyCounts[fips] || 0;
         html += `<div class="alert"><b>History map:</b> ${historyMapRangeLabel || "selected period"}<br><b>Alerts:</b> ${count}</div>`;

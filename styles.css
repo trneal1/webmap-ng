@@ -1755,7 +1755,8 @@ body.history-active #historyMapBadges {
     min-height:190px;
 }
 
-#plotCursorTooltip {
+#plotCursorTooltip,
+#countyHistoryCursorTooltip {
     position:absolute;
     left:12px;
     top:12px;
@@ -1772,30 +1773,35 @@ body.history-active #historyMapBadges {
     z-index:1;
 }
 
-#plotCursorTooltip.visible {
+#plotCursorTooltip.visible,
+#countyHistoryCursorTooltip.visible {
     display:block;
 }
 
-#plotCursorTooltip .plot-tooltip-time {
+#plotCursorTooltip .plot-tooltip-time,
+#countyHistoryCursorTooltip .plot-tooltip-time {
     font-family:monospace;
     font-weight:bold;
     margin-bottom:4px;
 }
 
-#plotCursorTooltip .plot-tooltip-row {
+#plotCursorTooltip .plot-tooltip-row,
+#countyHistoryCursorTooltip .plot-tooltip-row {
     display:flex;
     align-items:center;
     gap:6px;
     white-space:nowrap;
 }
 
-#plotCursorTooltip .plot-tooltip-swatch {
+#plotCursorTooltip .plot-tooltip-swatch,
+#countyHistoryCursorTooltip .plot-tooltip-swatch {
     width:9px;
     height:9px;
     flex:0 0 auto;
 }
 
-#plotCursorTooltip .plot-tooltip-title {
+#plotCursorTooltip .plot-tooltip-title,
+#countyHistoryCursorTooltip .plot-tooltip-title {
     overflow:hidden;
     text-overflow:ellipsis;
 }

@@ -68,6 +68,9 @@ async function clearHistorySnapshots(){
         populateHistoryMapEventTypeOptions(new Map());
         setStartupTaskProgress("history",100);
         setStartupStatus("history","History: 0 frames","done");
+        setStartupTaskProgress("countyBackfill",100);
+        setStartupStatus("countyBackfill","County history: 0 frames","done");
+        setStartupTaskProgress("alertRefs",100);
         setStartupStatus("alertRefs","Alert refs: 0 hashes","done");
         setStartupTaskProgress("plot",100);
         setStartupStatus("plot","Plot cache: 0 frames","done");

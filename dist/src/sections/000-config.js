@@ -22,6 +22,7 @@ const COUNTY_HISTORY_STORE_NAME = "countyHistory";
 const HISTORY_FRAME_DEDUP_MS = 60000;
 const HISTORY_FRAME_CACHE_LIMIT = 30;
 const HISTORY_MAP_SIDEBAR_CACHE_LIMIT = 8;
+const HISTORY_STARTUP_TASK_TIMEOUT_MS = 300000;
 
 const RADAR_TILE_URL = "https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q/{z}/{x}/{y}.png";
 const HISTORY_RADAR_WMS_URL = "https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0r-t.cgi";
@@ -91,6 +92,7 @@ const WebmapConfig = Object.freeze({
     HISTORY_FRAME_DEDUP_MS,
     HISTORY_FRAME_CACHE_LIMIT,
     HISTORY_MAP_SIDEBAR_CACHE_LIMIT,
+    HISTORY_STARTUP_TASK_TIMEOUT_MS,
     RADAR_TILE_URL,
     HISTORY_RADAR_WMS_URL,
     HISTORY_RADAR_WMS_LAYER,

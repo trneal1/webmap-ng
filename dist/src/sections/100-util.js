@@ -108,3 +108,29 @@ function runWhenIdle(callback,timeout=1200){
         setTimeout(callback,0);
     }
 }
+
+function withTimeout(promise,timeoutMs,message="Operation timed out"){
+    let settled=false;
+    return new Promise((resolve,reject)=>{
+        const timer=setTimeout(()=>{
+            if(settled) return;
+            settled=true;
+            reject(new Error(message));
+        },timeoutMs);
+
+        Promise.resolve(promise).then(
+            value=>{
+                if(settled) return;
+                settled=true;
+                clearTimeout(timer);
+                resolve(value);
+            },
+            error=>{
+                if(settled) return;
+                settled=true;
+                clearTimeout(timer);
+                reject(error);
+            }
+        );
+    });
+}

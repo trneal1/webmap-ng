@@ -23,7 +23,14 @@
         <span class="startup-status-label">History: waiting</span>
         <div class="startup-task-progress" aria-hidden="true"><div id="startupProgressHistory" class="startup-task-progress-bar"></div></div>
       </div>
-      <div id="startupStatusAlertRefs" class="startup-status-item">Alert refs: waiting</div>
+      <div id="startupStatusCountyBackfill" class="startup-status-item">
+        <span class="startup-status-label">County history: waiting</span>
+        <div class="startup-task-progress" aria-hidden="true"><div id="startupProgressCountyBackfill" class="startup-task-progress-bar"></div></div>
+      </div>
+      <div id="startupStatusAlertRefs" class="startup-status-item">
+        <span class="startup-status-label">Alert refs: waiting</span>
+        <div class="startup-task-progress" aria-hidden="true"><div id="startupProgressAlertRefs" class="startup-task-progress-bar"></div></div>
+      </div>
       <div id="startupStatusPlot" class="startup-status-item">
         <span class="startup-status-label">Plot cache: waiting</span>
         <div class="startup-task-progress" aria-hidden="true"><div id="startupProgressPlot" class="startup-task-progress-bar"></div></div>
@@ -257,7 +264,7 @@
   <div id="countyHistoryBody">
     <div id="countyHistoryControls">
       <label>Start <input id="countyHistoryStart" type="datetime-local" data-change="reloadCountyHistoryFromControls"></label>
-      <label>Stop <input id="countyHistoryStop" type="datetime-local" data-change="reloadCountyHistoryFromControls"></label>
+      <label>Stop <input id="countyHistoryStop" type="datetime-local" data-change="handleCountyHistoryStopChange"></label>
       <label>Alert types <select id="countyHistoryEventTitles" multiple data-change="drawCountyHistoryPlot"></select></label>
       <button type="button" data-click="selectAllCountyHistoryEventTitles">All</button>
       <button type="button" data-click="selectNoCountyHistoryEventTitles">None</button>
@@ -267,6 +274,7 @@
     </div>
     <div id="countyHistoryCanvasWrap">
       <canvas id="countyHistoryCanvas" width="1200" height="460"></canvas>
+      <div id="countyHistoryCursorTooltip" aria-live="polite"></div>
     </div>
     <div id="countyHistorySummary"></div>
   </div>
