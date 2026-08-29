@@ -26,9 +26,12 @@ function toggleRadar(){
     }
 }
 
-function reloadRadar(){
+function reloadRadar(options={}){
+    const { force=false }=options;
     nextRadarUpdate = Date.now() + radarUpdateInterval;
     currentRadarTimestamp = Date.now();
+    if(historyModeActive && !force) return;
+
     if(radarLayer) map.removeLayer(radarLayer);
     radarLayer=createRadarLayer(currentRadarTimestamp);
     if(radarToggle.checked) radarLayer.addTo(map);
