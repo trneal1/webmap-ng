@@ -237,6 +237,7 @@ async function applyHistoryMapFromControls(){
         historyMapActive=true;
         historyModeActive=true;
         historyFrameTimestamp=null;
+        historyAlertFeatures=[];
         disableLiveOnlyOverlays();
         historyModeBadge.textContent="History Map";
         historyTimeBadge.textContent="Preparing alert counts";
@@ -295,6 +296,7 @@ async function applyHistoryMapFromControls(){
         historyMapActive=true;
         historyModeActive=true;
         historyFrameTimestamp=null;
+        historyAlertFeatures=[];
         historyMapRangeLabel=new Date(frames[0].timestamp).toLocaleString() + " - " + new Date(frames[frames.length - 1].timestamp).toLocaleString();
         document.body.classList.add('history-active');
         suppressLiveAlertDisplayForHistoryMap();
@@ -382,6 +384,7 @@ function exitHistoryMapMode(){
     document.body.classList.remove('history-active');
     historyModeActive=false;
     historyFrameTimestamp=null;
+    historyAlertFeatures=[];
     rawData=liveRawData;
     restoreLiveAlertDisplayAfterHistoryMap();
     refreshEventFilterListIfOpen();

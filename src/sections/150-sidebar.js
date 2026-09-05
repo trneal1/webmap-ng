@@ -69,6 +69,9 @@ function showSidebar(fips,name,f,shouldOpen=true,focusAlertId=null){
         <b>Expires in:</b>
         <span class="timer" data-exp="${a.expires}" data-ref="${historyModeActive && historyFrameTimestamp ? historyFrameTimestamp : ""}"></span><br><br>
 
+        <b>Headline:</b><br>
+        ${a.headline || "No headline provided."}<br><br>
+
         <b>Description:</b><br>
         ${a.description || "No description provided."}<br>
         ${renderAlertDescriptionHashLine(a)}<br>

@@ -1,6 +1,7 @@
 // ===== RUNTIME STATE =====
 let geoLayer, geojsonData, rawData = {}, blinkIntervals = {};
 let liveAlertFeatures = [];
+let historyAlertFeatures = [];
 let alertPolygonLayer = null;
 let alertPolygonsVisible = false;
 let selectedAlertPolygonIds = new Set();
@@ -189,6 +190,7 @@ function defineLiveStateProperty(name,getter,setter){
     ["rawData",()=>rawData,value=>{ rawData=value; }],
     ["blinkIntervals",()=>blinkIntervals,value=>{ blinkIntervals=value; }],
     ["liveAlertFeatures",()=>liveAlertFeatures,value=>{ liveAlertFeatures=value; }],
+    ["historyAlertFeatures",()=>historyAlertFeatures,value=>{ historyAlertFeatures=value; }],
     ["alertPolygonLayer",()=>alertPolygonLayer,value=>{ alertPolygonLayer=value; }],
     ["alertPolygonsVisible",()=>alertPolygonsVisible,value=>{ alertPolygonsVisible=value; }],
     ["selectedAlertPolygonIds",()=>selectedAlertPolygonIds,value=>{ selectedAlertPolygonIds=value; }],

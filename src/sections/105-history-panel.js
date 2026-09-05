@@ -49,6 +49,7 @@ async function clearHistorySnapshots(){
         countyHistoryBackfillLoadPromise=null;
         historyFrameLoadToken++;
         historyFrameTimestamp=null;
+        historyAlertFeatures=[];
         restoreLiveAlertDisplayAfterHistoryMap();
         historyMapLoadToken++;
         historyMapActive=false;
@@ -231,6 +232,7 @@ async function showHistoryFrame(index,options={}){
         historyModeActive=true;
         historyFrameTimestamp=frame.timestamp;
         rawData=cloneJson(frame.alerts || {});
+        historyAlertFeatures=Array.isArray(frame.alertFeatures) ? cloneJson(frame.alertFeatures) : [];
         if(updateRadar) applyHistoryRadar(frame);
         if(!isHistoryPlaybackRunning()) refreshEventFilterListIfOpen();
         redrawMap();

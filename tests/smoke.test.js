@@ -196,6 +196,67 @@ async function run(){
         });
         assert.deepStrictEqual(eventTitleCountScope,{ panelCount:1, popupCount:1 });
 
+        const historyPolygonToggleScope = await page.evaluate(()=>{
+            const originalHistoryModeActive = Webmap.state.historyModeActive;
+            const originalHistoryMapActive = Webmap.state.historyMapActive;
+            const originalHistoryAlertFeatures = Webmap.state.historyAlertFeatures;
+            const originalLiveAlertFeatures = Webmap.state.liveAlertFeatures;
+            const originalAlertPolygonsVisible = Webmap.state.alertPolygonsVisible;
+            const originalAlertPolygonLayer = Webmap.state.alertPolygonLayer;
+            try{
+                if(originalAlertPolygonLayer) map.removeLayer(originalAlertPolygonLayer);
+                Webmap.state.alertPolygonLayer = null;
+                Webmap.state.historyModeActive = true;
+                Webmap.state.historyMapActive = false;
+                Webmap.state.alertPolygonsVisible = false;
+                Webmap.state.liveAlertFeatures = [];
+                Webmap.state.historyAlertFeatures = [{
+                    type:"Feature",
+                    id:"urn:oid:history-polygon",
+                    properties:{
+                        event:"Test Warning",
+                        headline:"Historical polygon",
+                        expires:"2026-07-04T12:00:00Z"
+                    },
+                    geometry:{
+                        type:"Polygon",
+                        coordinates:[[[-87,32],[-86.5,32],[-86.5,32.5],[-87,32.5],[-87,32]]]
+                    }
+                }];
+
+                document.dispatchEvent(new KeyboardEvent("keydown",{
+                    key:"v",
+                    bubbles:true,
+                    cancelable:true
+                }));
+
+                let layerCount = 0;
+                Webmap.state.alertPolygonLayer?.eachLayer(()=>{ layerCount++; });
+                return {
+                    visible:Webmap.state.alertPolygonsVisible,
+                    hasLayer:Boolean(Webmap.state.alertPolygonLayer),
+                    layerCount
+                };
+            }finally{
+                if(Webmap.state.alertPolygonLayer) map.removeLayer(Webmap.state.alertPolygonLayer);
+                Webmap.state.alertPolygonLayer = null;
+                Webmap.state.historyModeActive = originalHistoryModeActive;
+                Webmap.state.historyMapActive = originalHistoryMapActive;
+                Webmap.state.historyAlertFeatures = originalHistoryAlertFeatures;
+                Webmap.state.liveAlertFeatures = originalLiveAlertFeatures;
+                Webmap.state.alertPolygonsVisible = originalAlertPolygonsVisible;
+                if(originalAlertPolygonLayer) {
+                    Webmap.state.alertPolygonLayer = originalAlertPolygonLayer;
+                    originalAlertPolygonLayer.addTo(map);
+                }
+            }
+        });
+        assert.deepStrictEqual(historyPolygonToggleScope,{
+            visible:true,
+            hasLayer:true,
+            layerCount:1
+        });
+
         assert.strictEqual(pageErrors.length,0,"page errors: " + pageErrors.join("\n"));
         assert.strictEqual(consoleErrors.length,0,"console errors: " + consoleErrors.join("\n"));
     }finally{

@@ -60,6 +60,7 @@ const historyPanelController=Webmap.services.panels.createPanelController({
         stopHistoryPlayback();
         historyModeActive=false;
         historyFrameTimestamp=null;
+        historyAlertFeatures=[];
         if(!historyMapActive){
             document.body.classList.remove('history-active');
             rawData=liveRawData;

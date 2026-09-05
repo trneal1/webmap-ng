@@ -173,6 +173,34 @@ async function getStoredRadarTileBlob(frameId,coords){
     return blob;
 }
 
+function getStorableAlertPolygonFeatures(features=liveAlertFeatures){
+    return (Array.isArray(features) ? features : [])
+        .filter(feature=>{
+            const type=feature?.geometry?.type;
+            return type === "Polygon" || type === "MultiPolygon";
+        })
+        .map(feature=>{
+            const p=feature?.properties || {};
+            return {
+                type:"Feature",
+                id:feature?.id || p.id || "",
+                geometry:cloneJson(feature.geometry),
+                properties:{
+                    id:feature?.id || p.id || "",
+                    event:p.event || "",
+                    headline:p.headline || "",
+                    description:p.description || "",
+                    areaDesc:p.areaDesc || "",
+                    severity:p.severity || "",
+                    messageType:p.messageType || "",
+                    references:p.references || [],
+                    expires:p.expires,
+                    sent:p.sent
+                }
+            };
+        });
+}
+
 async function saveHistorySnapshot(alerts,timestamp=Date.now()){
     try{
         const clearGeneration=historyClearGeneration;
@@ -181,6 +209,7 @@ async function saveHistorySnapshot(alerts,timestamp=Date.now()){
             kind:"weather",
             scope:"US",
             alerts:cloneJson(alerts),
+            alertFeatures:getStorableAlertPolygonFeatures(),
             view:{
                 lat:map.getCenter().lat,
                 lng:map.getCenter().lng,

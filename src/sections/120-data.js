@@ -120,9 +120,10 @@ function redrawAlertPolygonLayer(){
         map.removeLayer(alertPolygonLayer);
         alertPolygonLayer=null;
     }
-    if(!alertPolygonsVisible || historyModeActive) return;
+    if(!alertPolygonsVisible || historyMapActive) return;
 
-    const polygonFeatures=liveAlertFeatures
+    const sourceFeatures=historyModeActive ? historyAlertFeatures : liveAlertFeatures;
+    const polygonFeatures=sourceFeatures
         .filter(feature=>{
             const type=feature?.geometry?.type;
             return type === "Polygon" || type === "MultiPolygon";
